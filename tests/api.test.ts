@@ -99,6 +99,7 @@ describe("Fleet Backend API Integration Tests", () => {
                 section: "request",
                 required: true,
                 dataSource: { kind: "lov", listCode: "DEPARTMENTS" },
+                meta: { reportable: true, pii: false },
               },
               {
                 id: "project",
@@ -107,6 +108,7 @@ describe("Fleet Backend API Integration Tests", () => {
                 label: "Project",
                 section: "request",
                 required: true,
+                meta: { reportable: true, pii: true },
               },
               {
                 id: "dispatch-notes",
@@ -160,6 +162,11 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(submitRes.body.formVersionId).toBe(createRes.body.version.id);
       expect(submitRes.body.stage).toBe("submitted");
       expect(submitRes.body.labelSnapshots.department).toEqual({ code: "IT", label: "Information Technology" });
+
+      const reportRes = await request(app).get(`/api/forms/${key}/submissions/report`);
+      expect(reportRes.status).toBe(200);
+      expect(reportRes.body[0].data).toEqual({ department: "IT" });
+      expect(reportRes.body[0].data.project).toBeUndefined();
 
       const requesterEdit = await request(app)
         .patch(`/api/forms/submissions/${submitRes.body.id}/data`)

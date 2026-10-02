@@ -16,6 +16,7 @@ import {
   validateFormSchema,
   validateFormWorkflow,
   validateFormSubmission,
+  projectReportableFields,
 } from "../domain/form-definition.js";
 
 export const formsRouter = Router();
@@ -96,6 +97,45 @@ formsRouter.get("/published/:key", async (req: Request, res: Response) => {
     res.status(500).json({ error: (error as Error).message });
   }
 });
+
+formsRouter.get(
+  "/:key/submissions/report",
+  requirePermission("read", "TSRFRequest"),
+  async (req: Request, res: Response) => {
+    try {
+      const [definition] = await db.select().from(formDefinitions)
+        .where(eq(formDefinitions.key, String(req.params.key)));
+      if (!definition) return res.status(404).json({ error: "Form definition not found" });
+      const requestedLimit = Number(req.query.limit ?? 100);
+      const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 500) : 100;
+      const rows = await db.select({
+        id: formSubmissions.id,
+        submissionNumber: formSubmissions.submissionNumber,
+        status: formSubmissions.status,
+        stage: formSubmissions.stage,
+        isLate: formSubmissions.isLate,
+        createdAt: formSubmissions.createdAt,
+        dataJson: formSubmissions.dataJson,
+        schemaJson: formVersions.schemaJson,
+      }).from(formSubmissions)
+        .innerJoin(formVersions, eq(formSubmissions.formVersionId, formVersions.id))
+        .where(eq(formVersions.formDefinitionId, definition.id))
+        .orderBy(desc(formSubmissions.createdAt))
+        .limit(limit);
+      res.json(rows.map((row) => ({
+        id: row.id,
+        submissionNumber: row.submissionNumber,
+        status: row.status,
+        stage: row.stage,
+        isLate: row.isLate,
+        createdAt: row.createdAt,
+        data: projectReportableFields(parseJson(row.schemaJson), parseJson(row.dataJson)),
+      })));
+    } catch {
+      res.status(500).json({ error: "Unable to load form report" });
+    }
+  },
+);
 
 formsRouter.get(
   "/:key",

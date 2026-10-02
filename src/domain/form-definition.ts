@@ -371,3 +371,26 @@ export async function validateFormSubmission(
   await validateFields(rootFields, payload, "", payload);
   return { errors, labelSnapshots };
 }
+
+export function projectReportableFields(schema: unknown, data: unknown): Record<string, unknown> {
+  if (!isRecord(schema) || !Array.isArray(schema.sections) || !isRecord(data)) return {};
+  const projectFields = (fields: unknown[], values: JsonRecord): Record<string, unknown> => {
+    const report: Record<string, unknown> = {};
+    fields.filter(isRecord).forEach((field) => {
+      if (typeof field.key !== "string" || !isRecord(field.meta) || field.meta.pii === true) return;
+      const value = values[field.key];
+      if (field.type === "repeater" && Array.isArray(value)) {
+        const rowFields = Array.isArray(field.rowFields) ? field.rowFields : [];
+        const rows = value.filter(isRecord).map((row) => projectFields(rowFields, row));
+        if (rows.some((row) => Object.keys(row).length > 0)) report[field.key] = rows;
+      } else if (field.meta.reportable === true && value !== undefined) {
+        report[field.key] = value;
+      }
+    });
+    return report;
+  };
+  const fields = schema.sections.flatMap((section) =>
+    isRecord(section) && Array.isArray(section.fields) ? section.fields : [],
+  );
+  return projectFields(fields, data);
+}
