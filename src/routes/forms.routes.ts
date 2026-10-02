@@ -1,9 +1,20 @@
 import { Router, Request, Response } from "express";
-import { and, desc, eq, max } from "drizzle-orm";
+import { and, desc, eq, max, sql } from "drizzle-orm";
 import { db } from "../db/connection.js";
-import { formDefinitions, formVersions, lovLists } from "../db/schema.js";
+import {
+  formDefinitions,
+  formSubmissionEvents,
+  formSubmissions,
+  formVersions,
+  lovItems,
+  lovLists,
+} from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
-import { validateFormSchema } from "../domain/form-definition.js";
+import { protectTsrfIntake } from "../middleware/arcjet.js";
+import {
+  validateFormSchema,
+  validateFormSubmission,
+} from "../domain/form-definition.js";
 
 export const formsRouter = Router();
 
@@ -14,6 +25,29 @@ const parseJson = (value: string) => {
     return {};
   }
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const STATUS_CATEGORIES = new Set([
+  "draft", "in_review", "returned", "approved", "in_progress", "completed", "rejected", "cancelled",
+]);
+
+async function resolveActiveLovLabel(listCode: string, itemCode: string): Promise<string | null> {
+  const [list] = await db.select({ id: lovLists.id }).from(lovLists)
+    .where(and(eq(lovLists.code, listCode), eq(lovLists.status, "active")));
+  if (!list) return null;
+  const [item] = await db.select({ label: lovItems.label }).from(lovItems)
+    .where(and(eq(lovItems.listId, list.id), eq(lovItems.code, itemCode), eq(lovItems.status, "active")));
+  return item?.label ?? null;
+}
+
+function workflowParts(workflow: Record<string, unknown>) {
+  const stages = Array.isArray(workflow.stages) ? workflow.stages.filter((stage) => typeof stage === "object" && stage !== null) as Array<Record<string, unknown>> : [];
+  const transitions = Array.isArray(workflow.transitions) ? workflow.transitions.filter((transition) => typeof transition === "object" && transition !== null) as Array<Record<string, unknown>> : [];
+  return { stages, transitions };
+}
 
 formsRouter.get("/published/:key", async (req: Request, res: Response) => {
   try {
@@ -79,6 +113,171 @@ formsRouter.get(
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
+    }
+  },
+);
+
+formsRouter.post(
+  "/:key/submissions",
+  protectTsrfIntake,
+  requirePermission("create", "TSRFRequest"),
+  async (req: Request, res: Response) => {
+    try {
+      const [definition] = await db.select().from(formDefinitions)
+        .where(eq(formDefinitions.key, String(req.params.key)));
+      if (!definition) return res.status(404).json({ error: "Form definition not found" });
+      const [version] = await db.select().from(formVersions)
+        .where(and(eq(formVersions.formDefinitionId, definition.id), eq(formVersions.status, "published")))
+        .orderBy(desc(formVersions.version)).limit(1);
+      if (!version) return res.status(404).json({ error: "Published form version not found" });
+
+      const schema = parseJson(version.schemaJson);
+      const data = req.body?.data;
+      const validation = await validateFormSubmission(schema, data, resolveActiveLovLabel);
+      if (validation.errors.length) {
+        return res.status(422).json({ error: "Submission validation failed", details: validation.errors });
+      }
+
+      const workflow = parseJson(version.workflowJson);
+      const { stages } = workflowParts(workflow);
+      const initialStage = typeof workflow.initialStage === "string" ? workflow.initialStage : "submitted";
+      const initialStageConfig = stages.find((stage) => stage.id === initialStage);
+      const initialStatus = typeof initialStageConfig?.statusCategory === "string" && STATUS_CATEGORIES.has(initialStageConfig.statusCategory)
+        ? initialStageConfig.statusCategory
+        : "in_review";
+      const sequence = await db.execute(sql`SELECT nextval('form_submission_number_seq') AS value`);
+      const sequenceValue = Number(sequence.rows[0]?.value);
+      const submissionNumber = `TSRF-${new Date().getFullYear()}-${String(sequenceValue).padStart(5, "0")}`;
+
+      const created = await db.transaction(async (transaction) => {
+        const [submission] = await transaction.insert(formSubmissions).values({
+          submissionNumber,
+          formVersionId: version.id,
+          status: initialStatus as typeof formSubmissions.$inferInsert.status,
+          stage: initialStage,
+          dataJson: JSON.stringify(data),
+          labelSnapshotsJson: JSON.stringify(validation.labelSnapshots),
+          createdById: req.user?.id ?? "unknown",
+          createdByName: req.user?.name ?? "unknown",
+          createdByRole: req.user?.role ?? "unknown",
+        }).returning();
+        await transaction.insert(formSubmissionEvents).values({
+          submissionId: submission.id,
+          fromStage: null,
+          toStage: initialStage,
+          action: "submitted",
+          actorId: req.user?.id ?? "unknown",
+          actorName: req.user?.name ?? "unknown",
+          actorRole: req.user?.role ?? "unknown",
+        });
+        return submission;
+      });
+
+      res.status(201).json({
+        ...created,
+        data: JSON.parse(created.dataJson),
+        labelSnapshots: JSON.parse(created.labelSnapshotsJson),
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Unable to create form submission" });
+    }
+  },
+);
+
+formsRouter.post(
+  "/submissions/:id/transition",
+  requirePermission("approve", "TSRFRequest"),
+  async (req: Request, res: Response) => {
+    try {
+      const { toStage, comment } = req.body;
+      if (typeof toStage !== "string") return res.status(400).json({ error: "toStage is required" });
+      const [submission] = await db.select().from(formSubmissions)
+        .where(eq(formSubmissions.id, String(req.params.id)));
+      if (!submission) return res.status(404).json({ error: "Form submission not found" });
+      const [version] = await db.select().from(formVersions)
+        .where(eq(formVersions.id, submission.formVersionId));
+      if (!version) return res.status(409).json({ error: "Pinned form version is unavailable" });
+
+      const workflow = parseJson(version.workflowJson);
+      const { stages, transitions } = workflowParts(workflow);
+      const transition = transitions.find((candidate) => candidate.from === submission.stage && candidate.to === toStage);
+      if (!transition) return res.status(409).json({ error: "Workflow transition is not configured" });
+      const allowedRoles = Array.isArray(transition.roles) ? transition.roles : typeof transition.role === "string" ? [transition.role] : [];
+      if (!req.user || !allowedRoles.includes(req.user.role)) return res.status(403).json({ error: "Role is not allowed to perform this transition" });
+
+      const reasonRequired = transition.reasonRequired === true || ["rejected", "cancelled", "returned"].includes(toStage);
+      if (reasonRequired && (typeof comment !== "string" || !comment.trim())) {
+        return res.status(400).json({ error: "A reason is required for this transition" });
+      }
+      const currentData = parseJson(submission.dataJson);
+      if (Array.isArray(transition.requiredFields)) {
+        const missing = transition.requiredFields.filter((field) =>
+          typeof field !== "string" || !isRecord(currentData) || !Object.prototype.hasOwnProperty.call(currentData, field) || currentData[field] === "" || currentData[field] === null || currentData[field] === undefined,
+        );
+        if (missing.length > 0) return res.status(422).json({ error: "Required transition fields are missing", fields: missing });
+      }
+      const targetStage = stages.find((stage) => stage.id === toStage);
+      const nextStatus = targetStage?.statusCategory;
+      if (typeof nextStatus !== "string" || !STATUS_CATEGORIES.has(nextStatus)) {
+        return res.status(422).json({ error: "Target stage has an invalid system status category" });
+      }
+
+      const updated = await db.transaction(async (transaction) => {
+        const [next] = await transaction.update(formSubmissions)
+          .set({ stage: toStage, status: nextStatus as typeof formSubmissions.$inferInsert.status, updatedAt: new Date() })
+          .where(and(eq(formSubmissions.id, submission.id), eq(formSubmissions.stage, submission.stage)))
+          .returning();
+        if (!next) return null;
+        await transaction.insert(formSubmissionEvents).values({
+          submissionId: submission.id,
+          fromStage: submission.stage,
+          toStage,
+          action: typeof transition.action === "string" ? transition.action : toStage,
+          actorId: req.user!.id,
+          actorName: req.user!.name,
+          actorRole: req.user!.role,
+          comment: typeof comment === "string" ? comment.trim() : null,
+        });
+        return next;
+      });
+      if (!updated) return res.status(409).json({ error: "Submission stage changed; reload and retry" });
+      res.json({ id: updated.id, submissionNumber: updated.submissionNumber, stage: updated.stage, status: updated.status });
+    } catch (error) {
+      res.status(500).json({ error: "Unable to transition form submission" });
+    }
+  },
+);
+
+formsRouter.get(
+  "/submissions/:id",
+  requirePermission("read", "TSRFRequest"),
+  async (req: Request, res: Response) => {
+    try {
+      const [submission] = await db.select().from(formSubmissions)
+        .where(eq(formSubmissions.id, String(req.params.id)));
+      if (!submission) return res.status(404).json({ error: "Form submission not found" });
+      res.json({
+        ...submission,
+        data: parseJson(submission.dataJson),
+        labelSnapshots: parseJson(submission.labelSnapshotsJson),
+      });
+    } catch {
+      res.status(500).json({ error: "Unable to load form submission" });
+    }
+  },
+);
+
+formsRouter.get(
+  "/submissions/:id/events",
+  requirePermission("read", "TSRFRequest"),
+  async (req: Request, res: Response) => {
+    try {
+      const events = await db.select().from(formSubmissionEvents)
+        .where(eq(formSubmissionEvents.submissionId, String(req.params.id)))
+        .orderBy(formSubmissionEvents.createdAt);
+      res.json(events);
+    } catch {
+      res.status(500).json({ error: "Unable to load form submission events" });
     }
   },
 );

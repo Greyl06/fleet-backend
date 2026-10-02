@@ -374,3 +374,33 @@ export const formVersions = pgTable("form_versions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+export const formSubmissions = pgTable("form_submissions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  submissionNumber: text("submission_number").notNull().unique(),
+  formVersionId: uuid("form_version_id").notNull().references(() => formVersions.id),
+  status: text("status", {
+    enum: ["draft", "in_review", "returned", "approved", "in_progress", "completed", "rejected", "cancelled"],
+  }).notNull().default("in_review"),
+  stage: text("stage").notNull(),
+  dataJson: text("data_json").notNull(),
+  labelSnapshotsJson: text("label_snapshots_json").notNull().default("{}"),
+  createdById: text("created_by_id").notNull(),
+  createdByName: text("created_by_name").notNull(),
+  createdByRole: text("created_by_role").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const formSubmissionEvents = pgTable("form_submission_events", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  submissionId: uuid("submission_id").notNull().references(() => formSubmissions.id, { onDelete: "cascade" }),
+  fromStage: text("from_stage"),
+  toStage: text("to_stage").notNull(),
+  action: text("action").notNull(),
+  actorId: text("actor_id").notNull(),
+  actorName: text("actor_name").notNull(),
+  actorRole: text("actor_role").notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});

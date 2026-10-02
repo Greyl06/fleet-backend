@@ -282,6 +282,41 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         UNIQUE (form_definition_id, version)
       );
 
+      CREATE SEQUENCE IF NOT EXISTS form_submission_number_seq START WITH 1;
+
+      CREATE TABLE IF NOT EXISTS form_submissions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        submission_number TEXT NOT NULL UNIQUE,
+        form_version_id UUID NOT NULL REFERENCES form_versions(id),
+        status TEXT NOT NULL DEFAULT 'in_review',
+        stage TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        label_snapshots_json TEXT NOT NULL DEFAULT '{}',
+        created_by_id TEXT NOT NULL,
+        created_by_name TEXT NOT NULL,
+        created_by_role TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS form_submission_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        submission_id UUID NOT NULL REFERENCES form_submissions(id) ON DELETE CASCADE,
+        from_stage TEXT,
+        to_stage TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        comment TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS form_submissions_version_created_idx
+        ON form_submissions(form_version_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS form_submission_events_submission_created_idx
+        ON form_submission_events(submission_id, created_at DESC);
+
       -- Generic LOV seed is additive; legacy reference tables remain supported.
       INSERT INTO lov_lists (code, name, description, is_system) VALUES
         ('DEPARTMENTS', 'Departments', 'Organizational departments', TRUE),

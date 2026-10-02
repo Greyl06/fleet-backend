@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { validateFormSchema } from "../src/domain/form-definition.js";
+import {
+  validateFormSchema,
+  validateFormSubmission,
+} from "../src/domain/form-definition.js";
 
 const validSchema = {
   key: "tsrf",
@@ -63,5 +66,61 @@ describe("validateFormSchema", () => {
     expect(validateFormSchema(invalid, new Set(["DEPARTMENTS"]))).toContain(
       'Required field "Project" is hidden by a rule and has no default.',
     );
+  });
+});
+
+describe("validateFormSubmission", () => {
+  it("validates required fields and snapshots active LOV labels", async () => {
+    const result = await validateFormSubmission(
+      validSchema,
+      { department: "IT", project: "Fleet pickup" },
+      async (listCode, code) => listCode === "DEPARTMENTS" && code === "IT" ? "Information Technology" : null,
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.labelSnapshots).toEqual({ department: { code: "IT", label: "Information Technology" } });
+  });
+
+  it("rejects unknown fields, missing required values, and invalid LOV options", async () => {
+    const result = await validateFormSubmission(
+      validSchema,
+      { department: "NO_SUCH_DEPARTMENT", unexpected: "tampered" },
+      async () => null,
+    );
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'Unknown field "unexpected".',
+      "Project is required.",
+      'Field "department" has an invalid or inactive option.',
+    ]));
+  });
+
+  it("rejects submitted values hidden by a matching rule and invalid repeater bounds", async () => {
+    const schema = {
+      ...validSchema,
+      sections: [{
+        ...validSchema.sections[0],
+        fields: [
+          ...validSchema.sections[0].fields,
+          {
+            id: "confidential", key: "confidential", type: "text", label: "Confidential",
+            rules: [{ when: { field: "department", operator: "eq", value: "IT" }, show: false }],
+          },
+          {
+            id: "passengers", key: "passengers", type: "repeater", label: "Passengers", required: true,
+            minRows: 1, maxRows: 2,
+            rowFields: [{ id: "passenger-name", key: "name", type: "text", label: "Name", required: true }],
+          },
+        ],
+      }],
+    };
+    const result = await validateFormSubmission(
+      schema,
+      { department: "IT", project: "Request", confidential: "hidden", passengers: [{}, {}, {}] },
+      async () => "Information Technology",
+    );
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'Hidden field "confidential" cannot be submitted.',
+      "Passengers allows at most 2 rows.",
+      "Name is required.",
+    ]));
   });
 });

@@ -92,6 +92,15 @@ describe("Fleet Backend API Integration Tests", () => {
             title: "Request",
             fields: [
               {
+                id: "department",
+                key: "department",
+                type: "lookup",
+                label: "Department",
+                section: "request",
+                required: true,
+                dataSource: { kind: "lov", listCode: "DEPARTMENTS" },
+              },
+              {
                 id: "project",
                 key: "project",
                 type: "text",
@@ -103,10 +112,21 @@ describe("Fleet Backend API Integration Tests", () => {
           },
         ],
       };
+      const workflow = {
+        initialStage: "submitted",
+        stages: [
+          { id: "submitted", statusCategory: "in_review" },
+          { id: "rejected", statusCategory: "rejected" },
+        ],
+        transitions: [
+          { from: "submitted", to: "rejected", roles: ["admin"], reasonRequired: true },
+        ],
+      };
       const createRes = await request(app).post("/api/forms").send({
         key,
         name: "Test Form",
         schema,
+        workflow,
       });
       expect(createRes.status).toBe(201);
       expect(createRes.body.version.version).toBe(1);
@@ -116,6 +136,43 @@ describe("Fleet Backend API Integration Tests", () => {
       );
       expect(publishRes.status).toBe(200);
       expect(publishRes.body.status).toBe("published");
+
+      const submitRes = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { department: "IT", project: "Test project" } });
+      expect(submitRes.status).toBe(201);
+      expect(submitRes.body.formVersionId).toBe(createRes.body.version.id);
+      expect(submitRes.body.stage).toBe("submitted");
+      expect(submitRes.body.labelSnapshots.department).toEqual({ code: "IT", label: "Information Technology" });
+
+      const tamperedRes = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { department: "IT", project: "Test project", unknown_field: "tampered" } });
+      expect(tamperedRes.status).toBe(422);
+
+      const unauthorizedTransition = await request(app)
+        .post(`/api/forms/submissions/${submitRes.body.id}/transition`)
+        .set("x-user-role", "department_requester")
+        .send({ toStage: "rejected", comment: "Not authorized" });
+      expect(unauthorizedTransition.status).toBe(403);
+
+      const missingReason = await request(app)
+        .post(`/api/forms/submissions/${submitRes.body.id}/transition`)
+        .send({ toStage: "rejected" });
+      expect(missingReason.status).toBe(400);
+
+      const transitionRes = await request(app)
+        .post(`/api/forms/submissions/${submitRes.body.id}/transition`)
+        .send({ toStage: "rejected", comment: "Request details were incomplete" });
+      expect(transitionRes.status).toBe(200);
+      expect(transitionRes.body.status).toBe("rejected");
+
+      const eventsRes = await request(app).get(`/api/forms/submissions/${submitRes.body.id}/events`);
+      expect(eventsRes.status).toBe(200);
+      expect(eventsRes.body).toHaveLength(2);
+      expect(eventsRes.body[1].comment).toBe("Request details were incomplete");
 
       const getRes = await request(app).get(`/api/forms/${key}`);
       expect(getRes.status).toBe(200);
