@@ -383,6 +383,8 @@ export const formSubmissions = pgTable("form_submissions", {
     enum: ["draft", "in_review", "returned", "approved", "in_progress", "completed", "rejected", "cancelled"],
   }).notNull().default("in_review"),
   stage: text("stage").notNull(),
+  isLate: boolean("is_late").notNull().default(false),
+  cutoffReason: text("cutoff_reason"),
   dataJson: text("data_json").notNull(),
   labelSnapshotsJson: text("label_snapshots_json").notNull().default("{}"),
   createdById: text("created_by_id").notNull(),

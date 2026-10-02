@@ -290,6 +290,8 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         form_version_id UUID NOT NULL REFERENCES form_versions(id),
         status TEXT NOT NULL DEFAULT 'in_review',
         stage TEXT NOT NULL,
+        is_late BOOLEAN NOT NULL DEFAULT FALSE,
+        cutoff_reason TEXT,
         data_json TEXT NOT NULL,
         label_snapshots_json TEXT NOT NULL DEFAULT '{}',
         created_by_id TEXT NOT NULL,
@@ -298,6 +300,8 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS is_late BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS cutoff_reason TEXT;
 
       CREATE TABLE IF NOT EXISTS form_submission_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

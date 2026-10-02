@@ -108,6 +108,13 @@ describe("Fleet Backend API Integration Tests", () => {
                 section: "request",
                 required: true,
               },
+              {
+                id: "dispatch-notes",
+                key: "dispatch_notes",
+                type: "text",
+                label: "Dispatch Notes",
+                section: "request",
+              },
             ],
           },
         ],
@@ -115,8 +122,16 @@ describe("Fleet Backend API Integration Tests", () => {
       const workflow = {
         initialStage: "submitted",
         stages: [
-          { id: "submitted", statusCategory: "in_review" },
-          { id: "rejected", statusCategory: "rejected" },
+          {
+            id: "submitted",
+            label: "Submitted",
+            statusCategory: "in_review",
+            fieldPermissions: {
+              project: { department_requester: "edit" },
+              dispatch_notes: { department_requester: "hidden", fleet_team: "edit" },
+            },
+          },
+          { id: "rejected", label: "Rejected", statusCategory: "rejected" },
         ],
         transitions: [
           { from: "submitted", to: "rejected", roles: ["admin"], reasonRequired: true },
@@ -146,6 +161,24 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(submitRes.body.stage).toBe("submitted");
       expect(submitRes.body.labelSnapshots.department).toEqual({ code: "IT", label: "Information Technology" });
 
+      const requesterEdit = await request(app)
+        .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { project: "Updated project" } });
+      expect(requesterEdit.status).toBe(200);
+
+      const requesterDispatchTamper = await request(app)
+        .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { dispatch_notes: "Tampered dispatch detail" } });
+      expect(requesterDispatchTamper.status).toBe(403);
+
+      const fleetDispatchEdit = await request(app)
+        .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
+        .set("x-user-role", "fleet_team")
+        .send({ data: { dispatch_notes: "Vehicle assigned" } });
+      expect(fleetDispatchEdit.status).toBe(200);
+
       const tamperedRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
@@ -171,8 +204,8 @@ describe("Fleet Backend API Integration Tests", () => {
 
       const eventsRes = await request(app).get(`/api/forms/submissions/${submitRes.body.id}/events`);
       expect(eventsRes.status).toBe(200);
-      expect(eventsRes.body).toHaveLength(2);
-      expect(eventsRes.body[1].comment).toBe("Request details were incomplete");
+      expect(eventsRes.body).toHaveLength(4);
+      expect(eventsRes.body[3].comment).toBe("Request details were incomplete");
 
       const getRes = await request(app).get(`/api/forms/${key}`);
       expect(getRes.status).toBe(200);

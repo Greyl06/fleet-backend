@@ -12,7 +12,9 @@ import {
 import { requirePermission } from "../middleware/auth.js";
 import { protectTsrfIntake } from "../middleware/arcjet.js";
 import {
+  evaluateFormCutoff,
   validateFormSchema,
+  validateFormWorkflow,
   validateFormSubmission,
 } from "../domain/form-definition.js";
 
@@ -47,6 +49,14 @@ function workflowParts(workflow: Record<string, unknown>) {
   const stages = Array.isArray(workflow.stages) ? workflow.stages.filter((stage) => typeof stage === "object" && stage !== null) as Array<Record<string, unknown>> : [];
   const transitions = Array.isArray(workflow.transitions) ? workflow.transitions.filter((transition) => typeof transition === "object" && transition !== null) as Array<Record<string, unknown>> : [];
   return { stages, transitions };
+}
+
+function workflowFieldKeys(fields: unknown[], prefix = ""): string[] {
+  return fields.flatMap((field) => {
+    if (!isRecord(field) || typeof field.key !== "string") return [];
+    const key = prefix ? `${prefix}.${field.key}` : field.key;
+    return [key, ...workflowFieldKeys(Array.isArray(field.rowFields) ? field.rowFields : [], key)];
+  });
 }
 
 formsRouter.get("/published/:key", async (req: Request, res: Response) => {
@@ -140,7 +150,14 @@ formsRouter.post(
 
       const workflow = parseJson(version.workflowJson);
       const { stages } = workflowParts(workflow);
-      const initialStage = typeof workflow.initialStage === "string" ? workflow.initialStage : "submitted";
+      const cutoffPolicy = isRecord(workflow.cutoff)
+        ? workflow.cutoff as { time: string; timezone: string; latePolicy: "flag" | "flag_and_exception_approval"; exceptionStage?: string }
+        : { time: "16:00", timezone: "Asia/Manila", latePolicy: "flag" as const };
+      const cutoff = evaluateFormCutoff(new Date(), cutoffPolicy);
+      const normalInitialStage = typeof workflow.initialStage === "string" ? workflow.initialStage : "submitted";
+      const initialStage = cutoff.isLate && cutoffPolicy.latePolicy === "flag_and_exception_approval" && cutoffPolicy.exceptionStage
+        ? cutoffPolicy.exceptionStage
+        : normalInitialStage;
       const initialStageConfig = stages.find((stage) => stage.id === initialStage);
       const initialStatus = typeof initialStageConfig?.statusCategory === "string" && STATUS_CATEGORIES.has(initialStageConfig.statusCategory)
         ? initialStageConfig.statusCategory
@@ -155,6 +172,8 @@ formsRouter.post(
           formVersionId: version.id,
           status: initialStatus as typeof formSubmissions.$inferInsert.status,
           stage: initialStage,
+          isLate: cutoff.isLate,
+          cutoffReason: cutoff.reason,
           dataJson: JSON.stringify(data),
           labelSnapshotsJson: JSON.stringify(validation.labelSnapshots),
           createdById: req.user?.id ?? "unknown",
@@ -165,10 +184,11 @@ formsRouter.post(
           submissionId: submission.id,
           fromStage: null,
           toStage: initialStage,
-          action: "submitted",
+          action: cutoff.isLate ? "submitted_after_cutoff" : "submitted",
           actorId: req.user?.id ?? "unknown",
           actorName: req.user?.name ?? "unknown",
           actorRole: req.user?.role ?? "unknown",
+          comment: cutoff.reason,
         });
         return submission;
       });
@@ -205,10 +225,6 @@ formsRouter.post(
       const allowedRoles = Array.isArray(transition.roles) ? transition.roles : typeof transition.role === "string" ? [transition.role] : [];
       if (!req.user || !allowedRoles.includes(req.user.role)) return res.status(403).json({ error: "Role is not allowed to perform this transition" });
 
-      const reasonRequired = transition.reasonRequired === true || ["rejected", "cancelled", "returned"].includes(toStage);
-      if (reasonRequired && (typeof comment !== "string" || !comment.trim())) {
-        return res.status(400).json({ error: "A reason is required for this transition" });
-      }
       const currentData = parseJson(submission.dataJson);
       if (Array.isArray(transition.requiredFields)) {
         const missing = transition.requiredFields.filter((field) =>
@@ -220,6 +236,10 @@ formsRouter.post(
       const nextStatus = targetStage?.statusCategory;
       if (typeof nextStatus !== "string" || !STATUS_CATEGORIES.has(nextStatus)) {
         return res.status(422).json({ error: "Target stage has an invalid system status category" });
+      }
+      const reasonRequired = transition.reasonRequired === true || ["rejected", "cancelled", "returned"].includes(nextStatus);
+      if (reasonRequired && (typeof comment !== "string" || !comment.trim())) {
+        return res.status(400).json({ error: "A reason is required for this transition" });
       }
 
       const updated = await db.transaction(async (transaction) => {
@@ -244,6 +264,74 @@ formsRouter.post(
       res.json({ id: updated.id, submissionNumber: updated.submissionNumber, stage: updated.stage, status: updated.status });
     } catch (error) {
       res.status(500).json({ error: "Unable to transition form submission" });
+    }
+  },
+);
+
+formsRouter.patch(
+  "/submissions/:id/data",
+  async (req: Request, res: Response) => {
+    try {
+      const ability = req.ability;
+      const canEditSubmission = ability?.can("manage", "all") || ability?.can("create", "TSRFRequest") || ability?.can("update", "TSRFRequest");
+      if (!canEditSubmission) return res.status(403).json({ error: "Forbidden" });
+      if (!isRecord(req.body?.data)) return res.status(400).json({ error: "data object is required" });
+
+      const [submission] = await db.select().from(formSubmissions)
+        .where(eq(formSubmissions.id, String(req.params.id)));
+      if (!submission) return res.status(404).json({ error: "Form submission not found" });
+      const [version] = await db.select().from(formVersions)
+        .where(eq(formVersions.id, submission.formVersionId));
+      if (!version) return res.status(409).json({ error: "Pinned form version is unavailable" });
+
+      const workflow = parseJson(version.workflowJson);
+      const { stages } = workflowParts(workflow);
+      const stage = stages.find((candidate) => candidate.id === submission.stage);
+      const stagePermissions = isRecord(stage?.fieldPermissions) ? stage.fieldPermissions : {};
+      const previousData = parseJson(submission.dataJson);
+      if (!isRecord(previousData)) return res.status(500).json({ error: "Stored submission data is invalid" });
+      const nextData = { ...previousData, ...req.body.data };
+      const changedKeys = Object.keys(req.body.data).filter((key) => JSON.stringify(previousData[key]) !== JSON.stringify(req.body.data[key]));
+      const isAdmin = ability?.can("manage", "all") ?? false;
+      if (!isAdmin) {
+        const role = req.user?.role ?? "";
+        const editableKeys = new Set(workflowFieldKeys(
+          isRecord(parseJson(version.schemaJson)) && Array.isArray(parseJson(version.schemaJson).sections)
+            ? (parseJson(version.schemaJson).sections as unknown[]).flatMap((section) => isRecord(section) && Array.isArray(section.fields) ? section.fields : [])
+            : [],
+        ));
+        const denied = changedKeys.filter((key) => {
+          if (!editableKeys.has(key)) return true;
+          const fieldPermission = stagePermissions[key];
+          return !isRecord(fieldPermission) || fieldPermission[role] !== "edit";
+        });
+        if (denied.length) return res.status(403).json({ error: "Fields are not editable for this role at the current stage", fields: denied });
+      }
+
+      const schema = parseJson(version.schemaJson);
+      const validation = await validateFormSubmission(schema, nextData, resolveActiveLovLabel);
+      if (validation.errors.length) return res.status(422).json({ error: "Submission validation failed", details: validation.errors });
+      const updated = await db.transaction(async (transaction) => {
+        const [next] = await transaction.update(formSubmissions)
+          .set({ dataJson: JSON.stringify(nextData), labelSnapshotsJson: JSON.stringify(validation.labelSnapshots), updatedAt: new Date() })
+          .where(and(eq(formSubmissions.id, submission.id), eq(formSubmissions.stage, submission.stage)))
+          .returning();
+        if (!next) return null;
+        await transaction.insert(formSubmissionEvents).values({
+          submissionId: submission.id,
+          fromStage: submission.stage,
+          toStage: submission.stage,
+          action: "data_updated",
+          actorId: req.user?.id ?? "unknown",
+          actorName: req.user?.name ?? "unknown",
+          actorRole: req.user?.role ?? "unknown",
+        });
+        return next;
+      });
+      if (!updated) return res.status(409).json({ error: "Submission stage changed; reload and retry" });
+      res.json({ id: updated.id, submissionNumber: updated.submissionNumber, stage: updated.stage, status: updated.status });
+    } catch {
+      res.status(500).json({ error: "Unable to update form submission" });
     }
   },
 );
@@ -393,10 +481,12 @@ formsRouter.post(
         .select({ code: lovLists.code })
         .from(lovLists)
         .where(eq(lovLists.status, "active"));
-      const validationErrors = validateFormSchema(
-        parseJson(draft.schemaJson),
-        new Set(availableLists.map((list) => list.code)),
-      );
+      const schema = parseJson(draft.schemaJson);
+      const workflow = parseJson(draft.workflowJson);
+      const validationErrors = [
+        ...validateFormSchema(schema, new Set(availableLists.map((list) => list.code))),
+        ...validateFormWorkflow(workflow, schema),
+      ];
       if (validationErrors.length > 0)
         return res
           .status(422)

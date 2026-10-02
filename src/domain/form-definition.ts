@@ -14,9 +14,37 @@ const FIELD_TYPES = new Set([
   "repeater",
 ]);
 const RULE_OPERATORS = new Set(["eq", "neq", "in", "not_in", "exists"]);
+const STATUS_CATEGORIES = new Set(["draft", "in_review", "returned", "approved", "in_progress", "completed", "rejected", "cancelled"]);
+const WORKFLOW_ROLES = new Set(["admin", "fleet_team", "procurement", "finance", "approver", "department_requester"]);
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export interface FormCutoffPolicy {
+  time: string;
+  timezone: string;
+  latePolicy: "flag" | "flag_and_exception_approval";
+  exceptionStage?: string;
+}
+
+export function evaluateFormCutoff(submittedAt: Date, policy: FormCutoffPolicy) {
+  const [cutoffHour, cutoffMinute] = policy.time.split(":").map(Number);
+  const localParts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: policy.timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(submittedAt);
+  const localHour = Number(localParts.find((part) => part.type === "hour")?.value);
+  const localMinute = Number(localParts.find((part) => part.type === "minute")?.value);
+  const isLate = localHour * 60 + localMinute > cutoffHour * 60 + cutoffMinute;
+  return {
+    isLate,
+    reason: isLate
+      ? `Submitted after ${policy.time} ${policy.timezone}; supervisory exception review required.`
+      : null,
+  };
 }
 
 export function validateFormSchema(
@@ -149,6 +177,84 @@ export function validateFormSchema(
     if (key) seenRootKeys.add(key);
   });
   visitFields(rootFields, "", new Set(), rootKeys);
+  return errors;
+}
+
+export function validateFormWorkflow(workflow: unknown, schema: unknown): string[] {
+  if (!isRecord(workflow) || Object.keys(workflow).length === 0) return [];
+  const errors: string[] = [];
+  if (!Array.isArray(workflow.stages) || workflow.stages.length === 0) return ["Workflow must define at least one stage."];
+  if (!Array.isArray(workflow.transitions)) return ["Workflow transitions must be an array."];
+
+  const stages = workflow.stages.filter(isRecord);
+  const stageIds = new Set<string>();
+  stages.forEach((stage) => {
+    if (typeof stage.id !== "string" || !stage.id.trim()) errors.push("Workflow stage ID is required.");
+    else if (stageIds.has(stage.id)) errors.push(`Workflow stage ID "${stage.id}" is duplicated.`);
+    else stageIds.add(stage.id);
+    if (typeof stage.label !== "string" || !stage.label.trim()) errors.push(`Workflow stage "${String(stage.id ?? "")}" needs a label.`);
+    if (typeof stage.statusCategory !== "string" || !STATUS_CATEGORIES.has(stage.statusCategory)) errors.push(`Workflow stage "${String(stage.id ?? "")}" has an invalid system status category.`);
+  });
+  if (typeof workflow.initialStage !== "string" || !stageIds.has(workflow.initialStage)) errors.push("Initial workflow stage must reference an existing stage.");
+
+  const schemaFields = isRecord(schema) && Array.isArray(schema.sections)
+    ? schema.sections.flatMap((section) => isRecord(section) && Array.isArray(section.fields) ? section.fields : []).filter(isRecord)
+    : [];
+  const fieldKeys = new Set(schemaFields.map((field) => field.key).filter((key): key is string => typeof key === "string"));
+  const collectNestedKeys = (fields: unknown[], prefix = ""): string[] => {
+    const keys: string[] = [];
+    fields.filter(isRecord).forEach((field) => {
+      const key = typeof field.key === "string" ? (prefix ? `${prefix}.${field.key}` : field.key) : "";
+      if (!key) return;
+      keys.push(key);
+      if (Array.isArray(field.rowFields)) keys.push(...collectNestedKeys(field.rowFields, key));
+    });
+    return keys;
+  };
+  collectNestedKeys(schemaFields).forEach((key) => fieldKeys.add(key));
+  stages.forEach((stage) => {
+    if (!isRecord(stage.fieldPermissions)) return;
+    Object.entries(stage.fieldPermissions).forEach(([fieldKey, rolePermissions]) => {
+      if (!fieldKeys.has(fieldKey)) errors.push(`Stage "${String(stage.label)}" permissions reference an unknown field.`);
+      if (!isRecord(rolePermissions)) {
+        errors.push(`Stage "${String(stage.label)}" has an invalid field permission map.`);
+        return;
+      }
+      Object.entries(rolePermissions).forEach(([role, permission]) => {
+        if (!WORKFLOW_ROLES.has(role)) errors.push(`Stage "${String(stage.label)}" has an unknown field permission role.`);
+        if (!new Set(["edit", "read", "hidden"]).has(String(permission))) errors.push(`Stage "${String(stage.label)}" has an invalid field permission.`);
+      });
+    });
+  });
+  workflow.transitions.filter(isRecord).forEach((transition, index) => {
+    if (typeof transition.from !== "string" || !stageIds.has(transition.from) || typeof transition.to !== "string" || !stageIds.has(transition.to)) {
+      errors.push(`Workflow transition ${index + 1} references an unknown stage.`);
+    }
+    const roles = Array.isArray(transition.roles) ? transition.roles : typeof transition.role === "string" ? [transition.role] : [];
+    if (roles.length === 0 || roles.some((role) => typeof role !== "string" || !WORKFLOW_ROLES.has(role))) errors.push(`Workflow transition ${index + 1} must contain valid roles.`);
+    if (Array.isArray(transition.requiredFields)) transition.requiredFields.forEach((field) => {
+      if (typeof field !== "string" || !fieldKeys.has(field)) errors.push(`Workflow transition ${index + 1} references an unknown required field.`);
+    });
+    const target = stages.find((stage) => stage.id === transition.to);
+    if (target && ["returned", "rejected", "cancelled"].includes(String(target.statusCategory)) && transition.reasonRequired !== true) {
+      errors.push(`Transitions to ${String(target.label)} must require a reason.`);
+    }
+  });
+
+  if (workflow.cutoff !== undefined) {
+    if (!isRecord(workflow.cutoff)) errors.push("Cutoff policy must be an object.");
+    else {
+      if (typeof workflow.cutoff.time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(workflow.cutoff.time)) errors.push("Cutoff time must use 24-hour HH:MM format.");
+      if (typeof workflow.cutoff.timezone !== "string" || !workflow.cutoff.timezone.trim()) errors.push("Cutoff timezone is required.");
+      else {
+        try { new Intl.DateTimeFormat("en-US", { timeZone: workflow.cutoff.timezone }); }
+        catch { errors.push(`Cutoff timezone "${workflow.cutoff.timezone}" is invalid.`); }
+      }
+      if (!new Set(["flag", "flag_and_exception_approval"]).has(String(workflow.cutoff.latePolicy))) errors.push("Cutoff late policy is invalid.");
+      if (workflow.cutoff.latePolicy === "flag_and_exception_approval" && (typeof workflow.cutoff.exceptionStage !== "string" || !stageIds.has(workflow.cutoff.exceptionStage))) errors.push("Cutoff exception stage must reference an existing workflow stage.");
+      if (workflow.cutoff.latePolicy === "flag_and_exception_approval" && (typeof workflow.cutoff.exceptionStage !== "string" || !stageIds.has(workflow.cutoff.exceptionStage))) errors.push("Cutoff exception stage must reference an existing workflow stage.");
+    }
+  }
   return errors;
 }
 
