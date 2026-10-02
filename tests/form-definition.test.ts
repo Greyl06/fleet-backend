@@ -143,6 +143,26 @@ describe("validateFormSubmission", () => {
     ]));
   });
 
+  it("validates active entity lookups and snapshots the entity label", async () => {
+    const schema = structuredClone(validSchema);
+    schema.sections[0].fields.push({
+      id: "vehicle",
+      key: "vehicleId",
+      type: "entity_lookup",
+      label: "Fleet Vehicle",
+      required: true,
+      dataSource: { kind: "entity", entity: "vehicles", valueField: "id", labelField: "plateNumber" },
+    });
+    const result = await validateFormSubmission(
+      schema,
+      { department: "IT", project: "Request", vehicleId: "vehicle-id" },
+      async () => "Information Technology",
+      async (entity, id) => entity === "vehicles" && id === "vehicle-id" ? "ABC-1234" : null,
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.labelSnapshots.vehicleId).toEqual({ code: "vehicle-id", label: "ABC-1234" });
+  });
+
   it("rejects submitted values hidden by a matching rule and invalid repeater bounds", async () => {
     const schema = {
       ...validSchema,

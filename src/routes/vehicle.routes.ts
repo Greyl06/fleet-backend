@@ -5,7 +5,7 @@ import { requirePermission } from '../middleware/auth.js';
 export const vehicleRouter = Router();
 
 // GET /api/vehicles - List all vehicles with live PMS calculations
-vehicleRouter.get('/', async (req: Request, res: Response) => {
+vehicleRouter.get('/', requirePermission('read', 'Vehicle'), async (req: Request, res: Response) => {
   try {
     const list = await VehicleService.listVehicles();
     res.json(list);
@@ -16,7 +16,7 @@ vehicleRouter.get('/', async (req: Request, res: Response) => {
 });
 
 // GET /api/vehicles/:id
-vehicleRouter.get('/:id', async (req: Request, res: Response) => {
+vehicleRouter.get('/:id', requirePermission('read', 'Vehicle'), async (req: Request, res: Response) => {
   try {
     const vehicle = await VehicleService.getVehicleById(String(req.params.id));
     if (!vehicle) {

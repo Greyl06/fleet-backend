@@ -8,6 +8,7 @@ import {
   formVersions,
   lovItems,
   lovLists,
+  vehicles,
 } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
 import { protectTsrfIntake } from "../middleware/arcjet.js";
@@ -44,6 +45,13 @@ async function resolveActiveLovLabel(listCode: string, itemCode: string): Promis
   const [item] = await db.select({ label: lovItems.label }).from(lovItems)
     .where(and(eq(lovItems.listId, list.id), eq(lovItems.code, itemCode), eq(lovItems.status, "active")));
   return item?.label ?? null;
+}
+
+async function resolveActiveEntityLabel(entity: string, id: string): Promise<string | null> {
+  if (entity !== 'vehicles') return null;
+  const [vehicle] = await db.select({ plateNumber: vehicles.plateNumber }).from(vehicles)
+    .where(and(eq(vehicles.id, id), eq(vehicles.status, 'active')));
+  return vehicle?.plateNumber ?? null;
 }
 
 function workflowParts(workflow: Record<string, unknown>) {
@@ -183,7 +191,7 @@ formsRouter.post(
 
       const schema = parseJson(version.schemaJson);
       const data = req.body?.data;
-      const validation = await validateFormSubmission(schema, data, resolveActiveLovLabel);
+      const validation = await validateFormSubmission(schema, data, resolveActiveLovLabel, resolveActiveEntityLabel);
       if (validation.errors.length) {
         return res.status(422).json({ error: "Submission validation failed", details: validation.errors });
       }
@@ -349,7 +357,7 @@ formsRouter.patch(
       }
 
       const schema = parseJson(version.schemaJson);
-      const validation = await validateFormSubmission(schema, nextData, resolveActiveLovLabel);
+      const validation = await validateFormSubmission(schema, nextData, resolveActiveLovLabel, resolveActiveEntityLabel);
       if (validation.errors.length) return res.status(422).json({ error: "Submission validation failed", details: validation.errors });
       const updated = await db.transaction(async (transaction) => {
         const [next] = await transaction.update(formSubmissions)

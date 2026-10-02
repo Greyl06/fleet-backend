@@ -9,6 +9,7 @@ const FIELD_TYPES = new Set([
   "time",
   "select",
   "lookup",
+  "entity_lookup",
   "checkbox",
   "notice",
   "repeater",
@@ -101,15 +102,12 @@ export function validateFormSchema(
       }
 
       if (isRecord(candidate.dataSource)) {
-        if (
-          candidate.dataSource.kind !== "lov" ||
-          typeof candidate.dataSource.listCode !== "string"
-        ) {
+        if (candidate.dataSource.kind === "lov" && typeof candidate.dataSource.listCode === "string") {
+          if (!availableLovCodes.has(candidate.dataSource.listCode)) {
+            errors.push(`Field "${label || key}" references unknown LOV list "${candidate.dataSource.listCode}".`);
+          }
+        } else if (!(candidate.dataSource.kind === "entity" && candidate.dataSource.entity === "vehicles")) {
           errors.push(`Field "${label || key}" has an invalid data source.`);
-        } else if (!availableLovCodes.has(candidate.dataSource.listCode)) {
-          errors.push(
-            `Field "${label || key}" references unknown LOV list "${candidate.dataSource.listCode}".`,
-          );
         }
       }
 
@@ -264,6 +262,7 @@ export interface FormSubmissionValidation {
 }
 
 type LovLabelResolver = (listCode: string, itemCode: string) => Promise<string | null>;
+type EntityLabelResolver = (entity: string, id: string) => Promise<string | null>;
 
 function isPresent(value: unknown): boolean {
   return value !== undefined && value !== null && value !== "";
@@ -286,6 +285,7 @@ export async function validateFormSubmission(
   schema: unknown,
   payload: unknown,
   resolveLovLabel: LovLabelResolver,
+  resolveEntityLabel: EntityLabelResolver = async () => null,
 ): Promise<FormSubmissionValidation> {
   const errors: string[] = [];
   const labelSnapshots: FormSubmissionValidation["labelSnapshots"] = {};
@@ -361,6 +361,12 @@ export async function validateFormSubmission(
         const itemLabel = await resolveLovLabel(listCode, code);
         if (!itemLabel) errors.push(`Field "${fieldPath}" has an invalid or inactive option.`);
         else labelSnapshots[fieldPath] = { code, label: itemLabel };
+      } else if (isRecord(candidate.dataSource) && candidate.dataSource.kind === "entity") {
+        const entity = String(candidate.dataSource.entity ?? "");
+        const id = String(value);
+        const entityLabel = await resolveEntityLabel(entity, id);
+        if (!entityLabel) errors.push(`Field "${fieldPath}" has an invalid or unavailable entity.`);
+        else labelSnapshots[fieldPath] = { code: id, label: entityLabel };
       } else if ((candidate.type === "select" || candidate.type === "lookup") && Array.isArray(candidate.options)) {
         const isValid = candidate.options.some((option) => isRecord(option) && option.value === value);
         if (!isValid) errors.push(`Field "${fieldPath}" has an invalid option.`);

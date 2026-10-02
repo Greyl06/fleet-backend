@@ -81,6 +81,21 @@ describe("Fleet Backend API Integration Tests", () => {
   describe("Versioned Form Definitions", () => {
     it("should create a draft form and publish its version", async () => {
       const key = `test-form-${Date.now()}`;
+      const plateNumber = `FORM-LOOKUP-${Date.now()}`;
+      const vehicleRes = await request(app).post("/api/vehicles").send({
+        plateNumber,
+        model: "Test Commuter Van",
+        vehicleType: "commuter_van",
+        currentKm: 100,
+        lastPmsKm: 0,
+        pmsIntervalKm: 5000,
+      });
+      expect(vehicleRes.status).toBe(201);
+      const vehicleLookupRes = await request(app)
+        .get('/api/vehicles')
+        .set('x-user-role', 'department_requester');
+      expect(vehicleLookupRes.status).toBe(200);
+      expect(vehicleLookupRes.body.some((vehicle: { id: string }) => vehicle.id === vehicleRes.body.id)).toBe(true);
       const schema = {
         key,
         name: "Test Form",
@@ -116,6 +131,16 @@ describe("Fleet Backend API Integration Tests", () => {
                 type: "text",
                 label: "Dispatch Notes",
                 section: "request",
+              },
+              {
+                id: "vehicle",
+                key: "vehicleId",
+                type: "entity_lookup",
+                label: "Fleet Vehicle",
+                section: "request",
+                required: true,
+                dataSource: { kind: "entity", entity: "vehicles", valueField: "id", labelField: "plateNumber" },
+                meta: { reportable: true, pii: false },
               },
             ],
           },
@@ -157,22 +182,23 @@ describe("Fleet Backend API Integration Tests", () => {
       const submitRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
-        .send({ data: { department: "IT", project: "Test project" } });
+        .send({ data: { department: "IT", project: "Test project", vehicleId: vehicleRes.body.id } });
       expect(submitRes.status).toBe(201);
       expect(submitRes.body.formVersionId).toBe(createRes.body.version.id);
       expect(submitRes.body.stage).toBe("submitted");
       expect(submitRes.body.labelSnapshots.department).toEqual({ code: "IT", label: "Information Technology" });
+      expect(submitRes.body.labelSnapshots.vehicleId).toEqual({ code: vehicleRes.body.id, label: plateNumber });
 
       const reportRes = await request(app).get(`/api/forms/${key}/submissions/report`);
       expect(reportRes.status).toBe(200);
-      expect(reportRes.body[0].data).toEqual({ department: "IT" });
+      expect(reportRes.body[0].data).toEqual({ department: "IT", vehicleId: vehicleRes.body.id });
       expect(reportRes.body[0].data.project).toBeUndefined();
 
       const requesterEdit = await request(app)
         .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
         .set("x-user-role", "department_requester")
         .send({ data: { project: "Updated project" } });
-      expect(requesterEdit.status).toBe(200);
+      expect(requesterEdit.status, JSON.stringify(requesterEdit.body)).toBe(200);
 
       const requesterDispatchTamper = await request(app)
         .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
@@ -189,7 +215,7 @@ describe("Fleet Backend API Integration Tests", () => {
       const tamperedRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
-        .send({ data: { department: "IT", project: "Test project", unknown_field: "tampered" } });
+        .send({ data: { department: "IT", project: "Test project", vehicleId: vehicleRes.body.id, unknown_field: "tampered" } });
       expect(tamperedRes.status).toBe(422);
 
       const unauthorizedTransition = await request(app)
