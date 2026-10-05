@@ -5,6 +5,7 @@ import {
   timestamp,
   boolean,
   uuid,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // ----------------------------------------------------
@@ -230,6 +231,60 @@ export const users = pgTable("users", {
     .notNull()
     .default("active"),
   lastActive: timestamp("last_active"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const authIdentities = pgTable("auth_identities", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  provider: text("provider", { enum: ["entra", "local"] }).notNull(),
+  issuer: text("issuer").notNull().default(""),
+  subject: text("subject").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastUsedAt: timestamp("last_used_at"),
+}, (table) => [uniqueIndex("auth_identities_provider_issuer_subject_uq").on(table.provider, table.issuer, table.subject)]);
+
+export const localCredentials = pgTable("local_credentials", {
+  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  passwordHash: text("password_hash").notNull(),
+  passwordChangedAt: timestamp("password_changed_at").defaultNow().notNull(),
+  resetRequired: boolean("reset_required").notNull().default(false),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const authSessions = pgTable("auth_sessions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  csrfTokenHash: text("csrf_token_hash").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastUsedAt: timestamp("last_used_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
+});
+
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  consumedAt: timestamp("consumed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const authSignupRequests = pgTable("auth_signup_requests", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  department: text("department").notNull(),
+  passwordHash: text("password_hash").notNull(),
+  verificationTokenHash: text("verification_token_hash"),
+  verificationExpiresAt: timestamp("verification_expires_at").notNull(),
+  emailVerifiedAt: timestamp("email_verified_at"),
+  status: text("status", { enum: ["pending_verification", "pending_approval"] })
+    .notNull()
+    .default("pending_verification"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

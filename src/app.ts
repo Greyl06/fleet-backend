@@ -10,13 +10,15 @@ import { userRouter } from './routes/user.routes.js';
 import { activityLogRouter } from './routes/activity-log.routes.js';
 import { lovRouter } from './routes/lov.routes.js';
 import { formsRouter } from './routes/forms.routes.js';
+import { authRouter } from './routes/auth.routes.js';
 import { authMiddleware } from './middleware/auth.js';
+import { config } from './config/env.js';
 import { logger } from './config/logger.js';
 
 export const app = express();
 
 // Global Middlewares
-app.use(cors());
+app.use(cors({ origin: config.frontendOrigin, credentials: true }));
 app.use(express.json());
 app.use(authMiddleware);
 
@@ -38,6 +40,7 @@ app.use('/api/roles', rolesRouter);
 app.use('/api/reference-data', referenceDataRouter);
 app.use('/api/users', userRouter);
 app.use('/api/activity-logs', activityLogRouter);
+app.use('/api/auth', authRouter);
 app.use('/api/lov', lovRouter);
 app.use('/api/forms', formsRouter);
 

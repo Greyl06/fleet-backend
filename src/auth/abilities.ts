@@ -10,6 +10,7 @@ export type Role =
   | "finance"
   | "approver"
   | "department_requester"
+  | "driver"
   | "admin";
 
 export type Action =
@@ -38,6 +39,26 @@ export interface AuthUser {
   name: string;
   role: Role;
   department?: string;
+}
+
+export function mapInternalRole(role: string): Role | null {
+  const roleMap: Record<string, Role> = {
+    admin: "admin",
+    system_admin: "admin",
+    superadmin: "admin",
+    fleet_team: "fleet_team",
+    fleet_manager: "fleet_team",
+    logistics_manager: "fleet_team",
+    logistics_officer: "fleet_team",
+    procurement: "procurement",
+    procurement_officer: "procurement",
+    finance: "finance",
+    finance_manager: "finance",
+    approver: "approver",
+    department_requester: "department_requester",
+    driver: "driver",
+  };
+  return roleMap[role] ?? null;
 }
 
 export function defineAbilityFor(user: AuthUser): AppAbility {
@@ -90,6 +111,12 @@ export function defineAbilityFor(user: AuthUser): AppAbility {
       cannot("approve", "all");
       cannot("manage", "RepairWorkOrder");
       cannot("manage", "PurchaseRequisition");
+      break;
+
+    case "driver":
+      can("read", "Vehicle");
+      can("update", "Vehicle");
+      can("read", "TSRFRequest");
       break;
 
     default:

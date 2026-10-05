@@ -2,8 +2,11 @@ import { Router, Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/connection.js';
 import { users } from '../db/schema.js';
+import { requirePermission } from '../middleware/auth.js';
 
 export const userRouter = Router();
+
+userRouter.use(requirePermission('manage', 'all'));
 
 // GET /api/users - List all users
 userRouter.get('/', async (_req: Request, res: Response) => {

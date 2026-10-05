@@ -173,6 +173,64 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         code TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         head TEXT NOT NULL DEFAULT '',
+      CREATE TABLE IF NOT EXISTS auth_identities (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        issuer TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        last_used_at TIMESTAMP,
+        UNIQUE (provider, issuer, subject)
+      );
+
+      CREATE TABLE IF NOT EXISTS local_credentials (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        password_hash TEXT NOT NULL,
+        password_changed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        reset_required BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        csrf_token_hash TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        last_used_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMP NOT NULL,
+        revoked_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP NOT NULL,
+        consumed_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS auth_signup_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        department TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        verification_token_hash TEXT,
+        verification_expires_at TIMESTAMP NOT NULL,
+        email_verified_at TIMESTAMP,
+        status TEXT NOT NULL DEFAULT 'pending_verification',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+      ALTER TABLE auth_signup_requests ALTER COLUMN verification_token_hash DROP NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS auth_sessions_user_active_idx ON auth_sessions(user_id, expires_at) WHERE revoked_at IS NULL;
+      CREATE INDEX IF NOT EXISTS password_reset_tokens_user_expiry_idx ON password_reset_tokens(user_id, expires_at) WHERE consumed_at IS NULL;
+      CREATE INDEX IF NOT EXISTS auth_signup_requests_pending_idx ON auth_signup_requests(status, created_at) WHERE status = 'pending_approval';
+
         is_active BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
