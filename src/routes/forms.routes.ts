@@ -8,8 +8,10 @@ import {
   formVersions,
   lovItems,
   lovLists,
+  users,
   vehicles,
 } from "../db/schema.js";
+import { mapInternalRole } from "../auth/abilities.js";
 import { requirePermission } from "../middleware/auth.js";
 import { protectTsrfIntake } from "../middleware/arcjet.js";
 import {
@@ -47,10 +49,48 @@ async function resolveActiveLovLabel(listCode: string, itemCode: string): Promis
   return item?.label ?? null;
 }
 
-async function resolveActiveEntityLabel(entity: string, id: string): Promise<string | null> {
-  if (entity !== 'vehicles') return null;
-  const [vehicle] = await db.select({ plateNumber: vehicles.plateNumber }).from(vehicles)
-    .where(and(eq(vehicles.id, id), eq(vehicles.status, 'active')));
+async function resolveDepartmentHeadUserId(
+  departmentCode: string,
+): Promise<string | null> {
+  const [departmentList] = await db
+    .select({ id: lovLists.id })
+    .from(lovLists)
+    .where(
+      and(eq(lovLists.code, "DEPARTMENTS"), eq(lovLists.status, "active")),
+    );
+  if (!departmentList) return null;
+  const [department] = await db
+    .select({ approvalUserId: lovItems.approvalUserId })
+    .from(lovItems)
+    .where(
+      and(
+        eq(lovItems.listId, departmentList.id),
+        eq(lovItems.code, departmentCode),
+        eq(lovItems.status, "active"),
+      ),
+    );
+  if (!department?.approvalUserId) return null;
+  const [approver] = await db
+    .select()
+    .from(users)
+    .where(
+      and(eq(users.id, department.approvalUserId), eq(users.status, "active")),
+    );
+  const role = approver ? mapInternalRole(approver.role) : null;
+  return approver && (role === "approver" || role === "admin")
+    ? approver.id
+    : null;
+}
+
+async function resolveActiveEntityLabel(
+  entity: string,
+  id: string,
+): Promise<string | null> {
+  if (entity !== "vehicles") return null;
+  const [vehicle] = await db
+    .select({ plateNumber: vehicles.plateNumber })
+    .from(vehicles)
+    .where(and(eq(vehicles.id, id), eq(vehicles.status, "active")));
   return vehicle?.plateNumber ?? null;
 }
 
@@ -58,6 +98,23 @@ function workflowParts(workflow: Record<string, unknown>) {
   const stages = Array.isArray(workflow.stages) ? workflow.stages.filter((stage) => typeof stage === "object" && stage !== null) as Array<Record<string, unknown>> : [];
   const transitions = Array.isArray(workflow.transitions) ? workflow.transitions.filter((transition) => typeof transition === "object" && transition !== null) as Array<Record<string, unknown>> : [];
   return { stages, transitions };
+}
+
+function hasDepartmentLookup(schema: unknown): boolean {
+  if (!isRecord(schema) || !Array.isArray(schema.sections)) return false;
+  return schema.sections.some(
+    (section) =>
+      isRecord(section) &&
+      Array.isArray(section.fields) &&
+      section.fields.some(
+        (field) =>
+          isRecord(field) &&
+          field.key === "department" &&
+          isRecord(field.dataSource) &&
+          field.dataSource.kind === "lov" &&
+          field.dataSource.listCode === "DEPARTMENTS",
+      ),
+  );
 }
 
 function workflowFieldKeys(fields: unknown[], prefix = ""): string[] {
@@ -193,7 +250,27 @@ formsRouter.post(
       const data = req.body?.data;
       const validation = await validateFormSubmission(schema, data, resolveActiveLovLabel, resolveActiveEntityLabel);
       if (validation.errors.length) {
-        return res.status(422).json({ error: "Submission validation failed", details: validation.errors });
+        return res.status(422).json({
+          error: "Submission validation failed",
+          details: validation.errors,
+        });
+      }
+
+      let departmentHeadUserId: string | null = null;
+      if (hasDepartmentLookup(schema)) {
+        const departmentCode =
+          isRecord(data) && typeof data.department === "string"
+            ? data.department
+            : "";
+        departmentHeadUserId = departmentCode
+          ? await resolveDepartmentHeadUserId(departmentCode)
+          : null;
+        if (!departmentHeadUserId) {
+          return res.status(422).json({
+            error:
+              "The selected department does not have an active approver assigned. Contact the Fleet administrator.",
+          });
+        }
       }
 
       const workflow = parseJson(version.workflowJson);
@@ -215,19 +292,23 @@ formsRouter.post(
       const submissionNumber = `TSRF-${new Date().getFullYear()}-${String(sequenceValue).padStart(5, "0")}`;
 
       const created = await db.transaction(async (transaction) => {
-        const [submission] = await transaction.insert(formSubmissions).values({
-          submissionNumber,
-          formVersionId: version.id,
-          status: initialStatus as typeof formSubmissions.$inferInsert.status,
-          stage: initialStage,
-          isLate: cutoff.isLate,
-          cutoffReason: cutoff.reason,
-          dataJson: JSON.stringify(data),
-          labelSnapshotsJson: JSON.stringify(validation.labelSnapshots),
-          createdById: req.user?.id ?? "unknown",
-          createdByName: req.user?.name ?? "unknown",
-          createdByRole: req.user?.role ?? "unknown",
-        }).returning();
+        const [submission] = await transaction
+          .insert(formSubmissions)
+          .values({
+            submissionNumber,
+            formVersionId: version.id,
+            status: initialStatus as typeof formSubmissions.$inferInsert.status,
+            stage: initialStage,
+            departmentHeadUserId,
+            isLate: cutoff.isLate,
+            cutoffReason: cutoff.reason,
+            dataJson: JSON.stringify(data),
+            labelSnapshotsJson: JSON.stringify(validation.labelSnapshots),
+            createdById: req.user?.id ?? "unknown",
+            createdByName: req.user?.name ?? "unknown",
+            createdByRole: req.user?.role ?? "unknown",
+          })
+          .returning();
         await transaction.insert(formSubmissionEvents).values({
           submissionId: submission.id,
           fromStage: null,
@@ -268,10 +349,35 @@ formsRouter.post(
 
       const workflow = parseJson(version.workflowJson);
       const { stages, transitions } = workflowParts(workflow);
-      const transition = transitions.find((candidate) => candidate.from === submission.stage && candidate.to === toStage);
-      if (!transition) return res.status(409).json({ error: "Workflow transition is not configured" });
-      const allowedRoles = Array.isArray(transition.roles) ? transition.roles : typeof transition.role === "string" ? [transition.role] : [];
-      if (!req.user || !allowedRoles.includes(req.user.role)) return res.status(403).json({ error: "Role is not allowed to perform this transition" });
+      const transition = transitions.find(
+        (candidate) =>
+          candidate.from === submission.stage && candidate.to === toStage,
+      );
+      if (!transition)
+        return res
+          .status(409)
+          .json({ error: "Workflow transition is not configured" });
+      const allowedRoles = Array.isArray(transition.roles)
+        ? transition.roles
+        : typeof transition.role === "string"
+          ? [transition.role]
+          : [];
+      if (!req.user || !allowedRoles.includes(req.user.role))
+        return res
+          .status(403)
+          .json({ error: "Role is not allowed to perform this transition" });
+      if (
+        submission.stage === "submitted" &&
+        req.user.role === "approver" &&
+        submission.departmentHeadUserId !== req.user.id
+      ) {
+        return res
+          .status(403)
+          .json({
+            error:
+              "Only the assigned department head can approve this request.",
+          });
+      }
 
       const currentData = parseJson(submission.dataJson);
       if (Array.isArray(transition.requiredFields)) {

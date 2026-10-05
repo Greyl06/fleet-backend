@@ -139,6 +139,11 @@ export const tsrfRequests = pgTable("tsrf_requests", {
   id: uuid("id").defaultRandom().primaryKey(),
   requestNumber: text("request_number").notNull().unique(),
   department: text("department").notNull(),
+  departmentCode: text("department_code"),
+  departmentHeadUserId: uuid("department_head_user_id").references(
+    () => users.id,
+    { onDelete: "set null" },
+  ),
   projectName: text("project_name").notNull(),
   origin: text("origin").notNull(),
   destination: text("destination").notNull(),
@@ -227,6 +232,7 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   role: text("role").notNull().default("driver"),
   department: text("department").notNull().default("Fleet Operations"),
+  departmentCode: text("department_code"),
   status: text("status", { enum: ["active", "inactive", "suspended"] })
     .notNull()
     .default("active"),
@@ -235,18 +241,32 @@ export const users = pgTable("users", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const authIdentities = pgTable("auth_identities", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  provider: text("provider", { enum: ["entra", "local"] }).notNull(),
-  issuer: text("issuer").notNull().default(""),
-  subject: text("subject").notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  lastUsedAt: timestamp("last_used_at"),
-}, (table) => [uniqueIndex("auth_identities_provider_issuer_subject_uq").on(table.provider, table.issuer, table.subject)]);
+export const authIdentities = pgTable(
+  "auth_identities",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: ["entra", "local"] }).notNull(),
+    issuer: text("issuer").notNull().default(""),
+    subject: text("subject").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    lastUsedAt: timestamp("last_used_at"),
+  },
+  (table) => [
+    uniqueIndex("auth_identities_provider_issuer_subject_uq").on(
+      table.provider,
+      table.issuer,
+      table.subject,
+    ),
+  ],
+);
 
 export const localCredentials = pgTable("local_credentials", {
-  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
   passwordHash: text("password_hash").notNull(),
   passwordChangedAt: timestamp("password_changed_at").defaultNow().notNull(),
   resetRequired: boolean("reset_required").notNull().default(false),
@@ -255,7 +275,9 @@ export const localCredentials = pgTable("local_credentials", {
 
 export const authSessions = pgTable("auth_sessions", {
   id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull().unique(),
   csrfTokenHash: text("csrf_token_hash").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -266,7 +288,9 @@ export const authSessions = pgTable("auth_sessions", {
 
 export const passwordResetTokens = pgTable("password_reset_tokens", {
   id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull().unique(),
   expiresAt: timestamp("expires_at").notNull(),
   consumedAt: timestamp("consumed_at"),
@@ -278,13 +302,25 @@ export const authSignupRequests = pgTable("auth_signup_requests", {
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
   department: text("department").notNull(),
-  passwordHash: text("password_hash").notNull(),
+  departmentCode: text("department_code").notNull().default(""),
+  requestedRole: text("requested_role"),
+  passwordHash: text("password_hash"),
   verificationTokenHash: text("verification_token_hash"),
   verificationExpiresAt: timestamp("verification_expires_at").notNull(),
   emailVerifiedAt: timestamp("email_verified_at"),
-  status: text("status", { enum: ["pending_verification", "pending_approval"] })
+  status: text("status", {
+    enum: ["pending_verification", "pending_approval", "approved", "rejected"],
+  })
     .notNull()
     .default("pending_verification"),
+  assignedRole: text("assigned_role"),
+  linkedUserId: uuid("linked_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  reviewedAt: timestamp("reviewed_at"),
+  reviewedById: uuid("reviewed_by_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -398,6 +434,9 @@ export const lovItems = pgTable("lov_items", {
   effectiveFrom: timestamp("effective_from"),
   effectiveTo: timestamp("effective_to"),
   attrsJson: text("attrs_json").notNull().default("{}"),
+  approvalUserId: uuid("approval_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -433,11 +472,28 @@ export const formVersions = pgTable("form_versions", {
 export const formSubmissions = pgTable("form_submissions", {
   id: uuid("id").defaultRandom().primaryKey(),
   submissionNumber: text("submission_number").notNull().unique(),
-  formVersionId: uuid("form_version_id").notNull().references(() => formVersions.id),
+  formVersionId: uuid("form_version_id")
+    .notNull()
+    .references(() => formVersions.id),
   status: text("status", {
-    enum: ["draft", "in_review", "returned", "approved", "in_progress", "completed", "rejected", "cancelled"],
-  }).notNull().default("in_review"),
+    enum: [
+      "draft",
+      "in_review",
+      "returned",
+      "approved",
+      "in_progress",
+      "completed",
+      "rejected",
+      "cancelled",
+    ],
+  })
+    .notNull()
+    .default("in_review"),
   stage: text("stage").notNull(),
+  departmentHeadUserId: uuid("department_head_user_id").references(
+    () => users.id,
+    { onDelete: "set null" },
+  ),
   isLate: boolean("is_late").notNull().default(false),
   cutoffReason: text("cutoff_reason"),
   dataJson: text("data_json").notNull(),
@@ -451,7 +507,9 @@ export const formSubmissions = pgTable("form_submissions", {
 
 export const formSubmissionEvents = pgTable("form_submission_events", {
   id: uuid("id").defaultRandom().primaryKey(),
-  submissionId: uuid("submission_id").notNull().references(() => formSubmissions.id, { onDelete: "cascade" }),
+  submissionId: uuid("submission_id")
+    .notNull()
+    .references(() => formSubmissions.id, { onDelete: "cascade" }),
   fromStage: text("from_stage"),
   toStage: text("to_stage").notNull(),
   action: text("action").notNull(),

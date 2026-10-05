@@ -1,8 +1,9 @@
 import { Router, Request, Response } from "express";
 import { and, asc, eq, ilike, or } from "drizzle-orm";
 import { db } from "../db/connection.js";
-import { lovAttributes, lovItems, lovLists } from "../db/schema.js";
+import { lovAttributes, lovItems, lovLists, users } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
+import { mapInternalRole } from "../auth/abilities.js";
 
 export const lovRouter = Router();
 lovRouter.use(requirePermission("read", "LovList"));
@@ -17,6 +18,34 @@ const parseJson = (
     return fallback;
   }
 };
+
+async function validateApprovalUser(
+  listCode: string,
+  approvalUserId: unknown,
+): Promise<string | null> {
+  if (
+    approvalUserId === undefined ||
+    approvalUserId === null ||
+    approvalUserId === ""
+  )
+    return null;
+  if (listCode !== "DEPARTMENTS" || typeof approvalUserId !== "string") {
+    throw new Error(
+      "Approval user can only be assigned to a department LOV item.",
+    );
+  }
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, approvalUserId));
+  const role = user?.status === "active" ? mapInternalRole(user.role) : null;
+  if (!user || (role !== "approver" && role !== "admin")) {
+    throw new Error(
+      "Department approver must be an active user with the Approver or Administrator role.",
+    );
+  }
+  return user.id;
+}
 
 lovRouter.get("/lists", async (_req: Request, res: Response) => {
   try {
@@ -146,6 +175,7 @@ lovRouter.post(
       const {
         code,
         label,
+        approvalUserId,
         parentId = null,
         sortOrder = 0,
         status = "active",
@@ -155,6 +185,10 @@ lovRouter.post(
       } = req.body;
       if (!code || !label)
         return res.status(400).json({ error: "code and label are required" });
+      const validatedApprovalUserId = await validateApprovalUser(
+        list.code,
+        approvalUserId,
+      );
       const [item] = await db
         .insert(lovItems)
         .values({
@@ -167,6 +201,7 @@ lovRouter.post(
           effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : null,
           effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
           attrsJson: JSON.stringify(attrs),
+          approvalUserId: validatedApprovalUserId,
         })
         .returning();
       res.status(201).json({ ...item, attrs: parseJson(item.attrsJson) });
@@ -190,7 +225,19 @@ lovRouter.put(
         effectiveFrom,
         effectiveTo,
         attrs,
+        approvalUserId,
       } = req.body;
+      const [existingItem] = await db
+        .select({ listCode: lovLists.code })
+        .from(lovItems)
+        .innerJoin(lovLists, eq(lovItems.listId, lovLists.id))
+        .where(eq(lovItems.id, String(req.params.id)));
+      if (!existingItem)
+        return res.status(404).json({ error: "LOV item not found" });
+      const validatedApprovalUserId =
+        approvalUserId === undefined
+          ? undefined
+          : await validateApprovalUser(existingItem.listCode, approvalUserId);
       const [item] = await db
         .update(lovItems)
         .set({
@@ -202,6 +249,10 @@ lovRouter.put(
           effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : undefined,
           effectiveTo: effectiveTo ? new Date(effectiveTo) : undefined,
           attrsJson: attrs === undefined ? undefined : JSON.stringify(attrs),
+          approvalUserId:
+            validatedApprovalUserId === undefined
+              ? undefined
+              : validatedApprovalUserId,
           updatedAt: new Date(),
         })
         .where(eq(lovItems.id, String(req.params.id)))

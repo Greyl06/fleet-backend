@@ -1,26 +1,28 @@
-import pg from 'pg';
-import { config } from '../config/env.js';
-import { logger } from '../config/logger.js';
+import pg from "pg";
+import { config } from "../config/env.js";
+import { logger } from "../config/logger.js";
 
 const { Client } = pg;
 
 export async function ensureDatabaseAndTables(): Promise<void> {
   const url = new URL(config.databaseUrl);
-  const targetDb = url.pathname.replace('/', '') || 'FleetDB';
+  const targetDb = url.pathname.replace("/", "") || "FleetDB";
 
   // Connect to postgres maintenance DB first to check/create target database
-  url.pathname = '/postgres';
+  url.pathname = "/postgres";
   const adminClient = new Client({ connectionString: url.toString() });
 
   try {
     await adminClient.connect();
     const res = await adminClient.query(
       `SELECT 1 FROM pg_database WHERE datname = $1`,
-      [targetDb]
+      [targetDb],
     );
 
     if (res.rowCount === 0) {
-      logger.info(`[Database] Database "${targetDb}" does not exist. Creating...`);
+      logger.info(
+        `[Database] Database "${targetDb}" does not exist. Creating...`,
+      );
       await adminClient.query(`CREATE DATABASE "${targetDb}"`);
       logger.info(`[Database] Database "${targetDb}" created successfully.`);
     } else {
@@ -28,7 +30,10 @@ export async function ensureDatabaseAndTables(): Promise<void> {
     }
   } catch (err: unknown) {
     const error = err as Error;
-    logger.warn({ error: error.message }, '[Database] Notice checking target database');
+    logger.warn(
+      { error: error.message },
+      "[Database] Notice checking target database",
+    );
   } finally {
     await adminClient.end().catch(() => {});
   }
@@ -108,6 +113,8 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         request_number TEXT NOT NULL UNIQUE,
         department TEXT NOT NULL,
+        department_code TEXT,
+        department_head_user_id UUID,
         project_name TEXT NOT NULL,
         origin TEXT NOT NULL,
         destination TEXT NOT NULL,
@@ -162,17 +169,21 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         email TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL DEFAULT 'driver',
         department TEXT NOT NULL DEFAULT 'Fleet Operations',
+        department_code TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         last_active TIMESTAMP,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS department_code TEXT;
+      ALTER TABLE tsrf_requests ADD COLUMN IF NOT EXISTS department_code TEXT;
+      ALTER TABLE tsrf_requests ADD COLUMN IF NOT EXISTS department_head_user_id UUID;
+      DO $$ BEGIN
+        ALTER TABLE tsrf_requests ADD CONSTRAINT tsrf_requests_department_head_user_fk
+          FOREIGN KEY (department_head_user_id) REFERENCES users(id) ON DELETE SET NULL;
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
 
-      CREATE TABLE IF NOT EXISTS departments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        code TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        head TEXT NOT NULL DEFAULT '',
       CREATE TABLE IF NOT EXISTS auth_identities (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -186,7 +197,7 @@ export async function ensureDatabaseAndTables(): Promise<void> {
 
       CREATE TABLE IF NOT EXISTS local_credentials (
         user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        password_hash TEXT NOT NULL,
+        password_hash TEXT,
         password_changed_at TIMESTAMP NOT NULL DEFAULT NOW(),
         reset_required BOOLEAN NOT NULL DEFAULT FALSE,
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -217,20 +228,38 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         name TEXT NOT NULL,
         email TEXT NOT NULL UNIQUE,
         department TEXT NOT NULL,
+        department_code TEXT NOT NULL DEFAULT '',
+        requested_role TEXT,
         password_hash TEXT NOT NULL,
         verification_token_hash TEXT,
         verification_expires_at TIMESTAMP NOT NULL,
         email_verified_at TIMESTAMP,
         status TEXT NOT NULL DEFAULT 'pending_verification',
+        assigned_role TEXT,
+        linked_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at TIMESTAMP,
+        reviewed_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
       ALTER TABLE auth_signup_requests ALTER COLUMN verification_token_hash DROP NOT NULL;
+      ALTER TABLE auth_signup_requests ALTER COLUMN password_hash DROP NOT NULL;
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS assigned_role TEXT;
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS department_code TEXT NOT NULL DEFAULT '';
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS requested_role TEXT;
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS linked_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP;
+      ALTER TABLE auth_signup_requests ADD COLUMN IF NOT EXISTS reviewed_by_id UUID REFERENCES users(id) ON DELETE SET NULL;
 
       CREATE INDEX IF NOT EXISTS auth_sessions_user_active_idx ON auth_sessions(user_id, expires_at) WHERE revoked_at IS NULL;
       CREATE INDEX IF NOT EXISTS password_reset_tokens_user_expiry_idx ON password_reset_tokens(user_id, expires_at) WHERE consumed_at IS NULL;
       CREATE INDEX IF NOT EXISTS auth_signup_requests_pending_idx ON auth_signup_requests(status, created_at) WHERE status = 'pending_approval';
 
+      CREATE TABLE IF NOT EXISTS departments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        head TEXT NOT NULL DEFAULT '',
         is_active BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
@@ -313,10 +342,12 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         effective_from TIMESTAMP,
         effective_to TIMESTAMP,
         attrs_json TEXT NOT NULL DEFAULT '{}',
+        approval_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
         UNIQUE (list_id, code)
       );
+      ALTER TABLE lov_items ADD COLUMN IF NOT EXISTS approval_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
 
       CREATE TABLE IF NOT EXISTS form_definitions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -348,6 +379,7 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         form_version_id UUID NOT NULL REFERENCES form_versions(id),
         status TEXT NOT NULL DEFAULT 'in_review',
         stage TEXT NOT NULL,
+        department_head_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
         is_late BOOLEAN NOT NULL DEFAULT FALSE,
         cutoff_reason TEXT,
         data_json TEXT NOT NULL,
@@ -360,6 +392,7 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       );
       ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS is_late BOOLEAN NOT NULL DEFAULT FALSE;
       ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS cutoff_reason TEXT;
+      ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS department_head_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
 
       CREATE TABLE IF NOT EXISTS form_submission_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -434,6 +467,9 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         ('logistics_officer', 'Logistics Officer', 'Manages dispatch, TSRF trip approvals and manifests', '#10b981', TRUE),
         ('maintenance_supervisor', 'Maintenance Supervisor', 'Oversees repair work orders and incident gating compliance', '#f59e0b', TRUE),
         ('procurement_officer', 'Procurement Officer', 'Authorizes PR gating approvals and parts fulfillment', '#8b5cf6', TRUE),
+        ('finance_manager', 'Finance Manager', 'Reviews and approves finance transactions', '#10b981', TRUE),
+        ('department_requester', 'Department Requester', 'Submits transportation service requests', '#f97316', TRUE),
+        ('approver', 'Approver', 'Reviews and approves assigned requests', '#14b8a6', TRUE),
         ('driver', 'Fleet Driver', 'Views assigned trip manifests and records vehicle odometers', '#64748b', TRUE)
       ON CONFLICT (key) DO NOTHING;
 
@@ -488,20 +524,20 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       ON CONFLICT (email) DO NOTHING;
     `);
 
-    logger.info('[Database] All tables initialized successfully.');
+    logger.info("[Database] All tables initialized successfully.");
   } catch (err: unknown) {
     const error = err as Error;
-    logger.error({ error: error.message }, '[Database] Migration failed');
+    logger.error({ error: error.message }, "[Database] Migration failed");
     throw error;
   } finally {
     await dbClient.end().catch(() => {});
   }
 }
 
-if (process.argv[1]?.includes('migrate')) {
+if (process.argv[1]?.includes("migrate")) {
   ensureDatabaseAndTables()
     .then(() => {
-      logger.info('Migration complete.');
+      logger.info("Migration complete.");
       process.exit(0);
     })
     .catch((err) => {

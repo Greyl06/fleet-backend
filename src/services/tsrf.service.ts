@@ -1,9 +1,10 @@
-import { eq, desc } from 'drizzle-orm';
-import { db } from '../db/connection.js';
-import { tsrfRequests } from '../db/schema.js';
-import { evaluateTsrfSubmissionTime } from '../domain/tsrf.js';
-import { VehicleService } from './vehicle.service.js';
-import { logger } from '../config/logger.js';
+import { and, desc, eq, or } from "drizzle-orm";
+import { db } from "../db/connection.js";
+import { lovItems, lovLists, tsrfRequests, users } from "../db/schema.js";
+import { mapInternalRole } from "../auth/abilities.js";
+import { evaluateTsrfSubmissionTime } from "../domain/tsrf.js";
+import { VehicleService } from "./vehicle.service.js";
+import { logger } from "../config/logger.js";
 
 export interface CreateTsrfInput {
   department: string;
@@ -41,6 +42,54 @@ export interface CreateTsrfInput {
 
 export class TsrfService {
   static async createTsrf(input: CreateTsrfInput) {
+    const [departmentList] = await db
+      .select({ id: lovLists.id })
+      .from(lovLists)
+      .where(
+        and(eq(lovLists.code, "DEPARTMENTS"), eq(lovLists.status, "active")),
+      );
+    if (!departmentList)
+      throw new Error("Department reference data is not configured.");
+    const [department] = await db
+      .select()
+      .from(lovItems)
+      .where(
+        and(
+          eq(lovItems.listId, departmentList.id),
+          eq(lovItems.status, "active"),
+          or(
+            eq(lovItems.code, input.department),
+            eq(lovItems.label, input.department),
+          ),
+        ),
+      );
+    if (!department)
+      throw new Error("Select an active department from the Department list.");
+    if (!department.approvalUserId)
+      throw new Error(
+        "The selected department has no assigned approver. Contact the Fleet administrator.",
+      );
+    const [departmentHead] = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.id, department.approvalUserId),
+          eq(users.status, "active"),
+        ),
+      );
+    const departmentHeadRole = departmentHead
+      ? mapInternalRole(departmentHead.role)
+      : null;
+    if (
+      !departmentHead ||
+      (departmentHeadRole !== "approver" && departmentHeadRole !== "admin")
+    ) {
+      throw new Error(
+        "The selected department approver is no longer active or eligible. Contact the Fleet administrator.",
+      );
+    }
+
     const submissionDate = input.submissionDate ?? new Date();
     const cutoffEval = evaluateTsrfSubmissionTime(submissionDate);
 
@@ -51,22 +100,24 @@ export class TsrfService {
       .insert(tsrfRequests)
       .values({
         requestNumber,
-        department: input.department,
+        department: department.label,
+        departmentCode: department.code,
+        departmentHeadUserId: departmentHead.id,
         projectName: input.projectName,
         origin: input.origin,
         destination: input.destination,
         stopsJson: JSON.stringify(input.stops ?? []),
         passengersJson: JSON.stringify(input.passengers ?? []),
         cargoJson: JSON.stringify(input.cargo ?? []),
-        vehicleType: input.vehicleType ?? 'commuter_van',
+        vehicleType: input.vehicleType ?? "commuter_van",
         assignedVehicleId: input.assignedVehicleId || null,
         assignedDriver: input.assignedDriver || null,
         departureDate: new Date(input.departureDate),
         callTime: input.callTime,
         isFlaggedAfterCutoff: cutoffEval.isFlaggedAfterCutoff,
         cutoffReason: cutoffEval.reason || null,
-        approvalStatus: 'pending',
-        tripStatus: 'requested',
+        approvalStatus: "pending",
+        tripStatus: "requested",
       })
       .returning();
 
@@ -76,63 +127,76 @@ export class TsrfService {
         requestNumber: created.requestNumber,
         isFlaggedAfterCutoff: created.isFlaggedAfterCutoff,
       },
-      '[TsrfService] TSRF request created',
+      "[TsrfService] TSRF request created",
     );
 
     return created;
   }
 
-  static async listTsrf(filters?: { department?: string; approvalStatus?: string }) {
-    let query = db.select().from(tsrfRequests).orderBy(desc(tsrfRequests.createdAt));
+  static async listTsrf(filters?: {
+    department?: string;
+    approvalStatus?: string;
+  }) {
+    let query = db
+      .select()
+      .from(tsrfRequests)
+      .orderBy(desc(tsrfRequests.createdAt));
     const results = await query;
     return results.map((r) => ({
       ...r,
-      stops: JSON.parse(r.stopsJson || '[]'),
-      passengers: JSON.parse(r.passengersJson || '[]'),
-      cargo: JSON.parse(r.cargoJson || '[]'),
+      stops: JSON.parse(r.stopsJson || "[]"),
+      passengers: JSON.parse(r.passengersJson || "[]"),
+      cargo: JSON.parse(r.cargoJson || "[]"),
     }));
   }
 
   static async getTsrfById(id: string) {
-    const [r] = await db.select().from(tsrfRequests).where(eq(tsrfRequests.id, id));
+    const [r] = await db
+      .select()
+      .from(tsrfRequests)
+      .where(eq(tsrfRequests.id, id));
     if (!r) return null;
     return {
       ...r,
-      stops: JSON.parse(r.stopsJson || '[]'),
-      passengers: JSON.parse(r.passengersJson || '[]'),
-      cargo: JSON.parse(r.cargoJson || '[]'),
+      stops: JSON.parse(r.stopsJson || "[]"),
+      passengers: JSON.parse(r.passengersJson || "[]"),
+      cargo: JSON.parse(r.cargoJson || "[]"),
     };
   }
 
   static async endorseTsrf(
     id: string,
-    role: 'department_head' | 'logistics_head' | 'finance_manager',
-    action: 'approve' | 'reject',
+    role: "department_head" | "logistics_head" | "finance_manager",
+    action: "approve" | "reject",
   ) {
     const tsrf = await this.getTsrfById(id);
     if (!tsrf) throw new Error(`TSRF with ID ${id} not found`);
 
-    if (action === 'reject') {
+    if (action === "reject") {
       const [updated] = await db
         .update(tsrfRequests)
-        .set({ approvalStatus: 'rejected', tripStatus: 'cancelled' })
+        .set({ approvalStatus: "rejected", tripStatus: "cancelled" })
         .where(eq(tsrfRequests.id, id))
         .returning();
       return updated;
     }
 
-    let nextStatus: 'pending' | 'dept_approved' | 'logistics_approved' | 'finance_approved' =
-      tsrf.approvalStatus as any;
+    let nextStatus:
+      | "pending"
+      | "dept_approved"
+      | "logistics_approved"
+      | "finance_approved" = tsrf.approvalStatus as any;
 
-    if (role === 'department_head') {
-      nextStatus = 'dept_approved';
-    } else if (role === 'logistics_head') {
-      nextStatus = 'logistics_approved';
-    } else if (role === 'finance_manager') {
-      nextStatus = 'finance_approved';
+    if (role === "department_head") {
+      nextStatus = "dept_approved";
+    } else if (role === "logistics_head") {
+      nextStatus = "logistics_approved";
+    } else if (role === "finance_manager") {
+      nextStatus = "finance_approved";
     }
 
-    const tripStatus = nextStatus === 'finance_approved' ? 'approved' : tsrf.tripStatus;
+    const tripStatus =
+      nextStatus === "finance_approved" ? "approved" : tsrf.tripStatus;
 
     const [updated] = await db
       .update(tsrfRequests)
@@ -145,7 +209,7 @@ export class TsrfService {
 
     logger.info(
       { id, role, newStatus: nextStatus },
-      '[TsrfService] TSRF endorsement processed',
+      "[TsrfService] TSRF endorsement processed",
     );
 
     return updated;
@@ -162,14 +226,17 @@ export class TsrfService {
     let updatedVehicle = null;
 
     if (vehicleId) {
-      updatedVehicle = await VehicleService.updateMileage(vehicleId, input.endingKm);
+      updatedVehicle = await VehicleService.updateMileage(
+        vehicleId,
+        input.endingKm,
+      );
     }
 
     const [updatedTsrf] = await db
       .update(tsrfRequests)
       .set({
         endingKm: input.endingKm,
-        tripStatus: 'completed',
+        tripStatus: "completed",
       })
       .where(eq(tsrfRequests.id, id))
       .returning();
@@ -181,7 +248,7 @@ export class TsrfService {
         vehicleId,
         vehiclePmsStatus: updatedVehicle?.status,
       },
-      '[TsrfService] TSRF trip completed & odometer updated',
+      "[TsrfService] TSRF trip completed & odometer updated",
     );
 
     return {
