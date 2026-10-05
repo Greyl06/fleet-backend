@@ -241,7 +241,8 @@ authRouter.post('/local/signup', rateLimitAuthentication, async (req: Request, r
     res.status(400).json({ error: 'Provide a valid name, email, department, and password of 12 to 128 characters.' });
     return;
   }
-  if (!mailer) {
+  const useDevelopmentVerification = config.env === 'development' || config.env === 'test';
+  if (!mailer && !useDevelopmentVerification) {
     res.status(503).json({ error: 'Signup email verification is not configured.' });
     return;
   }
@@ -280,18 +281,27 @@ authRouter.post('/local/signup', rateLimitAuthentication, async (req: Request, r
     }
 
     const verificationUrl = `${config.frontendOrigin}/signup#signupToken=${encodeURIComponent(rawToken)}`;
-    try {
-      await mailer.sendMail({
-        from: config.smtpFrom,
-        to: email,
-        subject: 'Verify your Fleet Hub signup',
-        text: `Verify your email address within 24 hours to submit your Fleet Hub account request: ${verificationUrl}`,
-      });
-    } catch {
-      await writeAuthAudit('signup_verification_delivery_failed', undefined, 'warning');
+    if (!useDevelopmentVerification && mailer) {
+      try {
+        await mailer.sendMail({
+          from: config.smtpFrom,
+          to: email,
+          subject: 'Verify your Fleet Hub signup',
+          text: `Verify your email address within 24 hours to submit your Fleet Hub account request: ${verificationUrl}`,
+        });
+      } catch {
+        await writeAuthAudit('signup_verification_delivery_failed', undefined, 'warning');
+        res.status(503).json({ error: 'Signup verification email could not be sent. Please retry later.' });
+        return;
+      }
     }
     await writeAuthAudit('signup_verification_requested');
-    res.status(202).json(signupResponse);
+    res.status(202).json(useDevelopmentVerification
+      ? {
+          message: 'Signup request created. Use the local verification link to confirm your email before administrator review.',
+          verificationUrl,
+        }
+      : signupResponse);
   } catch {
     res.status(500).json({ error: 'Unable to process the signup request.' });
   }

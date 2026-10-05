@@ -105,4 +105,33 @@ describe('Hybrid authentication and signup approval', () => {
     });
     expect(response.status).toBe(400);
   });
+
+  it('returns a local verification link without SMTP and keeps the request pending', async () => {
+    const email = `local-signup-${randomUUID()}@example.com`;
+    const password = 'Local-signup-password-2026!';
+    let signupRequestId: string | undefined;
+    try {
+      const signup = await request(app).post('/api/auth/local/signup').send({
+        name: 'Local Signup User',
+        email,
+        department: 'Fleet Operations',
+        password,
+      });
+      expect(signup.status).toBe(202);
+      expect(signup.body.verificationUrl).toContain('#signupToken=');
+      const token = new URLSearchParams(new URL(signup.body.verificationUrl).hash.slice(1)).get('signupToken');
+      expect(token).toBeTruthy();
+
+      const verification = await request(app).post('/api/auth/local/signup/verify').send({ token });
+      expect(verification.status).toBe(200);
+      const pendingLogin = await request(app).post('/api/auth/local/login').send({ email, password });
+      expect(pendingLogin.status).toBe(401);
+    } finally {
+      const [requestRow] = await db.select({ id: authSignupRequests.id })
+        .from(authSignupRequests)
+        .where(eq(authSignupRequests.email, email));
+      signupRequestId = requestRow?.id;
+      if (signupRequestId) await db.delete(authSignupRequests).where(eq(authSignupRequests.id, signupRequestId));
+    }
+  });
 });
