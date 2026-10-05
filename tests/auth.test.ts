@@ -9,6 +9,7 @@ import { db, pool } from '../src/db/connection.js';
 import { ensureDatabaseAndTables } from '../src/db/migrate.js';
 import { authSignupRequests, users } from '../src/db/schema.js';
 import { tokenHash } from '../src/services/auth.service.js';
+import { rateLimitAuthentication } from '../src/middleware/arcjet.js';
 
 describe('Hybrid authentication and signup approval', () => {
   beforeAll(async () => {
@@ -37,6 +38,48 @@ describe('Hybrid authentication and signup approval', () => {
     } finally {
       config.allowDevHeaderAuth = previousSetting;
     }
+  });
+
+  it('isolates local signup throttling from login retries and returns a retry duration', async () => {
+    const ip = `auth-limit-${randomUUID()}`;
+    const attempt = async (path: string, email: string) => {
+      const outcome: { status: number; headers: Record<string, string>; body?: Record<string, unknown> } = {
+        status: 200,
+        headers: {},
+      };
+      const response = {
+        setHeader(name: string, value: string) {
+          outcome.headers[name.toLowerCase()] = value;
+          return this;
+        },
+        status(code: number) {
+          outcome.status = code;
+          return this;
+        },
+        json(body: Record<string, unknown>) {
+          outcome.body = body;
+          return this;
+        },
+      };
+      await rateLimitAuthentication(
+        { ip, path, body: { email } } as unknown as import('express').Request,
+        response as unknown as import('express').Response,
+        () => undefined,
+      );
+      return outcome;
+    };
+
+    for (let index = 0; index < 50; index += 1) {
+      const loginAttempt = await attempt('/api/auth/local/login', `retry-${index}-${randomUUID()}@example.com`);
+      expect(loginAttempt.status).toBe(200);
+    }
+    const blockedLogin = await attempt('/api/auth/local/login', `retry-final-${randomUUID()}@example.com`);
+    expect(blockedLogin.status).toBe(429);
+    expect(Number(blockedLogin.headers['retry-after'])).toBeGreaterThan(0);
+    expect(blockedLogin.body?.message).toContain('Please wait about');
+
+    const signupAttempt = await attempt('/api/auth/local/signup', `signup-${randomUUID()}@example.com`);
+    expect(signupAttempt.status).toBe(200);
   });
 
   it('verifies signup email, requires admin role assignment, and enables login only after approval', async () => {

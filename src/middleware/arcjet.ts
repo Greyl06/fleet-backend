@@ -41,16 +41,30 @@ export const authRateLimitAj = arcjetKey
 
 const authFallbackWindows = new Map<string, { count: number; resetAt: number }>();
 let lastAuthSweep = 0;
+const AUTH_WINDOW_MS = 15 * 60_000;
+const AUTH_PRODUCTION_LIMIT = 8;
+const AUTH_DEVELOPMENT_LIMIT = 50;
 
-function consumeAuthWindow(key: string, now: number): boolean {
+function authRateLimitResponse(res: Response, retryAfterMs: number) {
+  const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+  const minutes = Math.ceil(retryAfterSeconds / 60);
+  res.setHeader('Retry-After', String(retryAfterSeconds));
+  res.status(429).json({
+    error: 'Too Many Requests',
+    retryAfterSeconds,
+    message: `Too many attempts. Please wait about ${minutes} minute${minutes === 1 ? '' : 's'} before trying again.`,
+  });
+}
+
+function consumeAuthWindow(key: string, now: number, limit: number): number | null {
   const current = authFallbackWindows.get(key);
   if (!current || current.resetAt <= now) {
-    authFallbackWindows.set(key, { count: 1, resetAt: now + 15 * 60_000 });
-    return true;
+    authFallbackWindows.set(key, { count: 1, resetAt: now + AUTH_WINDOW_MS });
+    return null;
   }
-  if (current.count >= 8) return false;
+  if (current.count >= limit) return current.resetAt - now;
   current.count += 1;
-  return true;
+  return null;
 }
 
 export async function rateLimitAuthentication(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -58,7 +72,7 @@ export async function rateLimitAuthentication(req: Request, res: Response, next:
     try {
       const decision = await authRateLimitAj.protect(req);
       if (decision.isDenied()) {
-        res.status(429).json({ error: 'Too Many Requests', message: 'Please wait before trying again.' });
+        authRateLimitResponse(res, AUTH_WINDOW_MS);
         return;
       }
     } catch (error) {
@@ -73,16 +87,23 @@ export async function rateLimitAuthentication(req: Request, res: Response, next:
     }
     lastAuthSweep = now;
   }
-  const ipKey = `ip:${req.ip || 'unknown'}`;
+  const endpoint = req.path.includes('/signup') ? 'signup' : 'login';
+  const ipKey = `ip:${endpoint}:${req.ip || 'unknown'}`;
   const accountValue = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  const accountKey = accountValue ? `account:${createHash('sha256').update(accountValue).digest('hex')}` : undefined;
+  const accountKey = accountValue
+    ? `account:${endpoint}:${createHash('sha256').update(accountValue).digest('hex')}`
+    : undefined;
   const newKeys = [ipKey, ...(accountKey ? [accountKey] : [])].filter((key) => !authFallbackWindows.has(key)).length;
   if (authFallbackWindows.size + newKeys > 10_000) {
-    res.status(429).json({ error: 'Too Many Requests', message: 'Please wait before trying again.' });
+    authRateLimitResponse(res, AUTH_WINDOW_MS);
     return;
   }
-  if (!consumeAuthWindow(ipKey, now) || (accountKey && !consumeAuthWindow(accountKey, now))) {
-    res.status(429).json({ error: 'Too Many Requests', message: 'Please wait before trying again.' });
+  const limit = isProduction ? AUTH_PRODUCTION_LIMIT : AUTH_DEVELOPMENT_LIMIT;
+  const ipRetryAfter = consumeAuthWindow(ipKey, now, limit);
+  const accountRetryAfter = accountKey ? consumeAuthWindow(accountKey, now, AUTH_PRODUCTION_LIMIT) : null;
+  const retryAfter = ipRetryAfter ?? accountRetryAfter;
+  if (retryAfter !== null) {
+    authRateLimitResponse(res, retryAfter);
     return;
   }
   next();
