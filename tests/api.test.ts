@@ -152,6 +152,42 @@ describe("Fleet Backend API Integration Tests", () => {
         });
       expect(invalidEffectiveRange.status).toBe(400);
 
+      const invalidVehicleCategory = await request(app)
+        .post("/api/lov/lists/VEHICLE_TYPES/items")
+        .send({
+          code: `INVALID_CATEGORY_${Date.now()}`,
+          label: "Invalid Vehicle Category",
+          attrs: { category: "unknown", pms_interval_km: 5000 },
+        });
+      expect(invalidVehicleCategory.status).toBe(400);
+
+      const missingRequiredVehicleAttribute = await request(app)
+        .post("/api/lov/lists/VEHICLE_TYPES/items")
+        .send({
+          code: `MISSING_CATEGORY_${Date.now()}`,
+          label: "Missing Vehicle Category",
+          attrs: { pms_interval_km: 5000 },
+        });
+      expect(missingRequiredVehicleAttribute.status).toBe(400);
+
+      const hierarchyCode = `HIERARCHY_${Date.now()}`;
+      const hierarchyList = await request(app)
+        .post("/api/lov/lists")
+        .send({ code: hierarchyCode, name: "Test Hierarchy", supportsHierarchy: true });
+      expect(hierarchyList.status).toBe(201);
+      const rootItem = await request(app)
+        .post(`/api/lov/lists/${hierarchyCode}/items`)
+        .send({ code: "ROOT", label: "Root" });
+      expect(rootItem.status).toBe(201);
+      const childItem = await request(app)
+        .post(`/api/lov/lists/${hierarchyCode}/items`)
+        .send({ code: "CHILD", label: "Child", parentId: rootItem.body.id });
+      expect(childItem.status).toBe(201);
+      const hierarchyCycle = await request(app)
+        .put(`/api/lov/items/${rootItem.body.id}`)
+        .send({ parentId: childItem.body.id });
+      expect(hierarchyCycle.status).toBe(400);
+
       const attributeKey = `test_attr_${Date.now()}`;
       const attributeRes = await request(app)
         .post("/api/lov/lists/DEPARTMENTS/attributes")
