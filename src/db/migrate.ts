@@ -442,24 +442,6 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       SELECT id, 'specialization', 'Specialization', 'text', FALSE, 2, '[]' FROM lov_lists WHERE code = 'VENDORS'
       ON CONFLICT (list_id, key) DO NOTHING;
 
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, d.code, d.name, json_build_object('head', d.head)::text
-      FROM departments d CROSS JOIN lov_lists l WHERE l.code = 'DEPARTMENTS'
-      ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, v.code, v.label, json_build_object('category', v.category, 'pms_interval_km', v.pms_interval_km)::text
-      FROM vehicle_types_ref v CROSS JOIN lov_lists l WHERE l.code = 'VEHICLE_TYPES'
-      ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, c.code, c.name, json_build_object('description', c.description)::text
-      FROM maintenance_categories c CROSS JOIN lov_lists l WHERE l.code = 'MAINTENANCE_CATEGORIES'
-      ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, upper(regexp_replace(v.name, '[^A-Za-z0-9]+', '_', 'g')), v.name,
-        json_build_object('contact_person', v.contact_person, 'phone', v.phone, 'specialization', v.specialization)::text
-      FROM vendors v CROSS JOIN lov_lists l WHERE l.code = 'VENDORS'
-      ON CONFLICT (list_id, code) DO NOTHING;
-
       -- Seed Default Roles
       INSERT INTO roles (key, label, description, color, is_system) VALUES
         ('superadmin', 'Super Administrator', 'Unrestricted administrative access to all enterprise modules', '#ef4444', TRUE),
@@ -514,6 +496,25 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         ('Speedy Brake & Tire Shop', 'Leo Maravilla', '09281234567', 'Brakes & Tires', TRUE),
         ('Hulma In-House Workshop', 'Fleet Team', 'Internal', 'All categories', TRUE)
       ON CONFLICT (name) DO NOTHING;
+
+      -- Backfill LOV items after legacy catalogs are seeded, including on the first startup.
+      INSERT INTO lov_items (list_id, code, label, attrs_json)
+      SELECT l.id, d.code, d.name, json_build_object('head', d.head)::text
+      FROM departments d CROSS JOIN lov_lists l WHERE l.code = 'DEPARTMENTS'
+      ON CONFLICT (list_id, code) DO NOTHING;
+      INSERT INTO lov_items (list_id, code, label, attrs_json)
+      SELECT l.id, v.code, v.label, json_build_object('category', v.category, 'pms_interval_km', v.pms_interval_km)::text
+      FROM vehicle_types_ref v CROSS JOIN lov_lists l WHERE l.code = 'VEHICLE_TYPES'
+      ON CONFLICT (list_id, code) DO NOTHING;
+      INSERT INTO lov_items (list_id, code, label, attrs_json)
+      SELECT l.id, c.code, c.name, json_build_object('description', c.description)::text
+      FROM maintenance_categories c CROSS JOIN lov_lists l WHERE l.code = 'MAINTENANCE_CATEGORIES'
+      ON CONFLICT (list_id, code) DO NOTHING;
+      INSERT INTO lov_items (list_id, code, label, attrs_json)
+      SELECT l.id, upper(regexp_replace(v.name, '[^A-Za-z0-9]+', '_', 'g')), v.name,
+        json_build_object('contact_person', v.contact_person, 'phone', v.phone, 'specialization', v.specialization)::text
+      FROM vendors v CROSS JOIN lov_lists l WHERE l.code = 'VENDORS'
+      ON CONFLICT (list_id, code) DO NOTHING;
 
       -- Seed Default Users
       INSERT INTO users (name, email, role, department, status) VALUES
