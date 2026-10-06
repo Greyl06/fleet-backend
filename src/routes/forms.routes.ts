@@ -313,20 +313,6 @@ function hasDepartmentLookup(schema: unknown): boolean {
   );
 }
 
-function workflowFieldKeys(fields: unknown[], prefix = ""): string[] {
-  return fields.flatMap((field) => {
-    if (!isRecord(field) || typeof field.key !== "string") return [];
-    const key = prefix ? `${prefix}.${field.key}` : field.key;
-    return [
-      key,
-      ...workflowFieldKeys(
-        Array.isArray(field.rowFields) ? field.rowFields : [],
-        key,
-      ),
-    ];
-  });
-}
-
 function changedFormFieldPaths(
   fields: unknown[],
   previous: Record<string, unknown>,
