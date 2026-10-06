@@ -1,4 +1,4 @@
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lte, or } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { lovItems, lovLists, tsrfRequests, users } from "../db/schema.js";
 import { mapInternalRole } from "../auth/abilities.js";
@@ -50,6 +50,7 @@ export class TsrfService {
       );
     if (!departmentList)
       throw new Error("Department reference data is not configured.");
+    const now = new Date();
     const [department] = await db
       .select()
       .from(lovItems)
@@ -57,6 +58,8 @@ export class TsrfService {
         and(
           eq(lovItems.listId, departmentList.id),
           eq(lovItems.status, "active"),
+          or(isNull(lovItems.effectiveFrom), lte(lovItems.effectiveFrom, now)),
+          or(isNull(lovItems.effectiveTo), gte(lovItems.effectiveTo, now)),
           or(
             eq(lovItems.code, input.department),
             eq(lovItems.label, input.department),
@@ -90,7 +93,7 @@ export class TsrfService {
       );
     }
 
-    const submissionDate = input.submissionDate ?? new Date();
+    const submissionDate = input.submissionDate ?? now;
     const cutoffEval = evaluateTsrfSubmissionTime(submissionDate);
 
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);

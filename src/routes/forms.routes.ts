@@ -1,5 +1,16 @@
 import { Router, Request, Response } from "express";
-import { and, desc, eq, inArray, max, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  max,
+  or,
+  sql,
+} from "drizzle-orm";
 import { db } from "../db/connection.js";
 import {
   formDefinitions,
@@ -165,6 +176,7 @@ async function resolveActiveLovLabel(
     .from(lovLists)
     .where(and(eq(lovLists.code, listCode), eq(lovLists.status, "active")));
   if (!list) return null;
+  const now = new Date();
   const [item] = await db
     .select({ label: lovItems.label })
     .from(lovItems)
@@ -173,6 +185,8 @@ async function resolveActiveLovLabel(
         eq(lovItems.listId, list.id),
         eq(lovItems.code, itemCode),
         eq(lovItems.status, "active"),
+        or(isNull(lovItems.effectiveFrom), lte(lovItems.effectiveFrom, now)),
+        or(isNull(lovItems.effectiveTo), gte(lovItems.effectiveTo, now)),
       ),
     );
   return item?.label ?? null;
@@ -188,6 +202,7 @@ async function resolveDepartmentHeadUserId(
       and(eq(lovLists.code, "DEPARTMENTS"), eq(lovLists.status, "active")),
     );
   if (!departmentList) return null;
+  const now = new Date();
   const [department] = await db
     .select({ approvalUserId: lovItems.approvalUserId })
     .from(lovItems)
@@ -196,6 +211,8 @@ async function resolveDepartmentHeadUserId(
         eq(lovItems.listId, departmentList.id),
         eq(lovItems.code, departmentCode),
         eq(lovItems.status, "active"),
+        or(isNull(lovItems.effectiveFrom), lte(lovItems.effectiveFrom, now)),
+        or(isNull(lovItems.effectiveTo), gte(lovItems.effectiveTo, now)),
       ),
     );
   if (!department?.approvalUserId) return null;

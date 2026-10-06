@@ -71,11 +71,86 @@ describe("Fleet Backend API Integration Tests", () => {
         ),
       ).toBe(true);
 
+      const futureCode = `FUTURE_${Date.now()}`;
+      const futureItem = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: futureCode,
+          label: "Future Department",
+          effectiveFrom: new Date(Date.now() + 86_400_000).toISOString(),
+          attrs: { head: "Future Head" },
+        });
+      expect(futureItem.status).toBe(201);
+      const activeItems = await request(app).get(
+        "/api/lov/lists/DEPARTMENTS/items?status=active",
+      );
+      expect(
+        activeItems.body.some((item: { code: string }) => item.code === futureCode),
+      ).toBe(false);
+      const catalogItems = await request(app).get(
+        "/api/lov/lists/DEPARTMENTS/items",
+      );
+      expect(
+        catalogItems.body.some((item: { code: string }) => item.code === futureCode),
+      ).toBe(true);
+      const legacyFutureDepartmentRequest = await request(app)
+        .post("/api/tsrf")
+        .set("x-user-role", "department_requester")
+        .send({
+          department: futureCode,
+          projectName: "Future department test",
+          origin: "Origin",
+          destination: "Destination",
+          departureDate: "2026-10-07T08:00:00.000Z",
+          callTime: "08:00",
+          submissionDate: "2026-01-01T00:00:00.000Z",
+        });
+      expect(legacyFutureDepartmentRequest.status).toBe(400);
+
       const deniedWrite = await request(app)
         .post("/api/lov/lists/DEPARTMENTS/items")
         .set("x-user-role", "department_requester")
         .send({ code: "DENIED", label: "Denied" });
       expect(deniedWrite.status).toBe(403);
+
+      const unknownAttribute = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: `INVALID_ATTR_${Date.now()}`,
+          label: "Invalid Attribute Department",
+          attrs: { unconfigured: "value" },
+        });
+      expect(unknownAttribute.status).toBe(400);
+
+      const wrongAttributeType = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: `INVALID_TYPE_${Date.now()}`,
+          label: "Invalid Type Department",
+          attrs: { head: 42 },
+        });
+      expect(wrongAttributeType.status).toBe(400);
+
+      const hierarchyNotSupported = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: `INVALID_PARENT_${Date.now()}`,
+          label: "Invalid Parent Department",
+          parentId: "00000000-0000-4000-8000-000000000001",
+          attrs: { head: "Test Head" },
+        });
+      expect(hierarchyNotSupported.status).toBe(400);
+
+      const invalidEffectiveRange = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: `INVALID_DATES_${Date.now()}`,
+          label: "Invalid Dates Department",
+          effectiveFrom: "2026-12-01T00:00:00.000Z",
+          effectiveTo: "2026-11-01T00:00:00.000Z",
+          attrs: { head: "Test Head" },
+        });
+      expect(invalidEffectiveRange.status).toBe(400);
 
       const attributeKey = `test_attr_${Date.now()}`;
       const attributeRes = await request(app)
@@ -107,7 +182,18 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(itemRes.status).toBe(201);
       expect(itemRes.body.attrs.head).toBe("Test Head");
 
-      const deactivateRes = await request(app).delete(
+        const invalidItemUpdate = await request(app)
+          .put(`/api/lov/items/${itemRes.body.id}`)
+          .send({ attrs: { unconfigured: "value" } });
+        expect(invalidItemUpdate.status).toBe(400);
+
+        const validItemUpdate = await request(app)
+          .put(`/api/lov/items/${itemRes.body.id}`)
+          .send({ label: "Updated Test Department" });
+        expect(validItemUpdate.status).toBe(200);
+        expect(validItemUpdate.body.attrs.head).toBe("Test Head");
+
+        const deactivateRes = await request(app).delete(
         `/api/lov/items/${itemRes.body.id}`,
       );
       expect(deactivateRes.status).toBe(200);
@@ -287,6 +373,31 @@ describe("Fleet Backend API Integration Tests", () => {
       );
       expect(publishRes.status).toBe(200);
       expect(publishRes.body.status).toBe("published");
+
+      const futureDepartmentCode = `FUTURE_SUBMIT_${Date.now()}`;
+      const futureDepartment = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: futureDepartmentCode,
+          label: "Future Request Department",
+          effectiveFrom: new Date(Date.now() + 86_400_000).toISOString(),
+          attrs: { head: "Future Head" },
+        });
+      expect(futureDepartment.status).toBe(201);
+      const futureDepartmentSubmission = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({
+          data: {
+            department: futureDepartmentCode,
+            project: "Future department test",
+            vehicleId: vehicleRes.body.id,
+          },
+        });
+      expect(futureDepartmentSubmission.status).toBe(422);
+      expect(futureDepartmentSubmission.body.details).toContain(
+        'Field "department" has an invalid or inactive option.',
+      );
 
       const restoreDepartmentApprover =
         await temporarilyAssignDepartmentApprover("IT");

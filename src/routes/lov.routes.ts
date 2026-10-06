@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { and, asc, eq, ilike, or } from "drizzle-orm";
+import { and, asc, eq, gte, ilike, isNull, lte, or } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { lovAttributes, lovItems, lovLists, users } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
@@ -18,6 +18,108 @@ const parseJson = (
     return fallback;
   }
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseOptionalDate(value: unknown, label: string): Date | null {
+  if (value === undefined || value === null || value === "") return null;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime()))
+    throw new Error(`${label} must be a valid date.`);
+  return date;
+}
+
+async function validateItemAttributes(
+  listId: string,
+  value: unknown,
+): Promise<Record<string, unknown>> {
+  if (!isRecord(value)) throw new Error("Item attributes must be an object.");
+  const definitions = await db
+    .select()
+    .from(lovAttributes)
+    .where(eq(lovAttributes.listId, listId));
+  const definitionsByKey = new Map(
+    definitions.map((definition) => [definition.key, definition]),
+  );
+
+  for (const key of Object.keys(value)) {
+    if (!definitionsByKey.has(key))
+      throw new Error(`Attribute "${key}" is not defined for this LOV list.`);
+  }
+
+  definitions.forEach((definition) => {
+    const hasValue = Object.prototype.hasOwnProperty.call(value, definition.key);
+    const attributeValue = value[definition.key];
+    if (definition.required && !hasValue)
+      throw new Error(`Attribute "${definition.key}" is required.`);
+    if (!hasValue) return;
+
+    const validType =
+      definition.type === "text"
+        ? typeof attributeValue === "string"
+        : definition.type === "number"
+          ? typeof attributeValue === "number" && Number.isFinite(attributeValue)
+          : definition.type === "boolean"
+            ? typeof attributeValue === "boolean"
+            : definition.type === "select"
+              ? typeof attributeValue === "string"
+              : false;
+    if (!validType)
+      throw new Error(
+        `Attribute "${definition.key}" must be a ${definition.type} value.`,
+      );
+    if (definition.type === "select") {
+      const options = parseJson(definition.optionsJson, []);
+      const validOptions = Array.isArray(options)
+        ? options.map((option) => (isRecord(option) ? option.value : option))
+        : [];
+      if (!validOptions.includes(attributeValue))
+        throw new Error(`Attribute "${definition.key}" has an invalid option.`);
+    }
+  });
+  return value;
+}
+
+async function validateParentItem(
+  list: typeof lovLists.$inferSelect,
+  parentId: unknown,
+  itemId?: string,
+): Promise<string | null> {
+  if (parentId === undefined || parentId === null || parentId === "") return null;
+  if (typeof parentId !== "string")
+    throw new Error("Parent item ID must be a string.");
+  if (!list.supportsHierarchy)
+    throw new Error("This LOV list does not support parent items.");
+  if (parentId === itemId)
+    throw new Error("An LOV item cannot be its own parent.");
+
+  const [parent] = await db
+    .select({ id: lovItems.id, parentId: lovItems.parentId })
+    .from(lovItems)
+    .where(
+      and(
+        eq(lovItems.id, parentId),
+        eq(lovItems.listId, list.id),
+        eq(lovItems.status, "active"),
+      ),
+    );
+  if (!parent)
+    throw new Error("Parent item must be active and belong to this LOV list.");
+
+  let ancestorId = parent.parentId;
+  while (ancestorId) {
+    if (ancestorId === itemId)
+      throw new Error("Parent assignment would create an LOV hierarchy cycle.");
+    const [ancestor] = await db
+      .select({ parentId: lovItems.parentId })
+      .from(lovItems)
+      .where(eq(lovItems.id, ancestorId));
+    ancestorId = ancestor?.parentId ?? null;
+  }
+  return parentId;
+}
 
 async function validateApprovalUser(
   listCode: string,
@@ -136,10 +238,18 @@ lovRouter.get("/lists/:code/items", async (req: Request, res: Response) => {
       .where(eq(lovLists.code, String(req.params.code)));
     if (!list) return res.status(404).json({ error: "LOV list not found" });
     const conditions = [eq(lovItems.listId, list.id)];
-    if (req.query.status)
+    if (req.query.status) {
       conditions.push(
         eq(lovItems.status, String(req.query.status) as "active" | "inactive"),
       );
+      if (req.query.status === "active") {
+        const now = new Date();
+        conditions.push(
+          or(isNull(lovItems.effectiveFrom), lte(lovItems.effectiveFrom, now))!,
+          or(isNull(lovItems.effectiveTo), gte(lovItems.effectiveTo, now))!,
+        );
+      }
+    }
     if (req.query.parentId)
       conditions.push(eq(lovItems.parentId, String(req.query.parentId)));
     if (req.query.q)
@@ -185,6 +295,12 @@ lovRouter.post(
       } = req.body;
       if (!code || !label)
         return res.status(400).json({ error: "code and label are required" });
+      const validatedAttrs = await validateItemAttributes(list.id, attrs);
+      const validatedParentId = await validateParentItem(list, parentId);
+      const fromDate = parseOptionalDate(effectiveFrom, "Effective from");
+      const toDate = parseOptionalDate(effectiveTo, "Effective to");
+      if (fromDate && toDate && fromDate > toDate)
+        throw new Error("Effective from must not be after effective to.");
       const validatedApprovalUserId = await validateApprovalUser(
         list.code,
         approvalUserId,
@@ -195,12 +311,12 @@ lovRouter.post(
           listId: list.id,
           code,
           label,
-          parentId,
+          parentId: validatedParentId,
           sortOrder,
           status,
-          effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : null,
-          effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
-          attrsJson: JSON.stringify(attrs),
+          effectiveFrom: fromDate,
+          effectiveTo: toDate,
+          attrsJson: JSON.stringify(validatedAttrs),
           approvalUserId: validatedApprovalUserId,
         })
         .returning();
@@ -228,12 +344,43 @@ lovRouter.put(
         approvalUserId,
       } = req.body;
       const [existingItem] = await db
-        .select({ listCode: lovLists.code })
+        .select({
+          listId: lovLists.id,
+          listCode: lovLists.code,
+          attrsJson: lovItems.attrsJson,
+          parentId: lovItems.parentId,
+          effectiveFrom: lovItems.effectiveFrom,
+          effectiveTo: lovItems.effectiveTo,
+        })
         .from(lovItems)
         .innerJoin(lovLists, eq(lovItems.listId, lovLists.id))
         .where(eq(lovItems.id, String(req.params.id)));
       if (!existingItem)
         return res.status(404).json({ error: "LOV item not found" });
+      const [list] = await db
+        .select()
+        .from(lovLists)
+        .where(eq(lovLists.id, existingItem.listId));
+      if (!list) return res.status(404).json({ error: "LOV list not found" });
+      const validatedAttrs = await validateItemAttributes(
+        list.id,
+        attrs === undefined ? parseJson(existingItem.attrsJson) : attrs,
+      );
+      const validatedParentId = await validateParentItem(
+        list,
+        parentId === undefined ? existingItem.parentId : parentId,
+        String(req.params.id),
+      );
+      const fromDate =
+        effectiveFrom === undefined
+          ? existingItem.effectiveFrom
+          : parseOptionalDate(effectiveFrom, "Effective from");
+      const toDate =
+        effectiveTo === undefined
+          ? existingItem.effectiveTo
+          : parseOptionalDate(effectiveTo, "Effective to");
+      if (fromDate && toDate && fromDate > toDate)
+        throw new Error("Effective from must not be after effective to.");
       const validatedApprovalUserId =
         approvalUserId === undefined
           ? undefined
@@ -243,12 +390,12 @@ lovRouter.put(
         .set({
           code,
           label,
-          parentId,
+          parentId: validatedParentId,
           sortOrder,
           status,
-          effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : undefined,
-          effectiveTo: effectiveTo ? new Date(effectiveTo) : undefined,
-          attrsJson: attrs === undefined ? undefined : JSON.stringify(attrs),
+          effectiveFrom: fromDate,
+          effectiveTo: toDate,
+          attrsJson: JSON.stringify(validatedAttrs),
           approvalUserId:
             validatedApprovalUserId === undefined
               ? undefined
