@@ -54,8 +54,8 @@ function canReadAllSubmissions(req: Request): boolean {
   const ability = req.ability;
   return Boolean(
     ability?.can("manage", "all") ||
-      ability?.can("approve", "TSRFRequest") ||
-      ability?.can("update", "TSRFRequest"),
+    ability?.can("approve", "TSRFRequest") ||
+    ability?.can("update", "TSRFRequest"),
   );
 }
 
@@ -66,27 +66,30 @@ function projectVisibleSubmissionData(
   role: string,
   data: unknown,
   labelSnapshots: unknown,
+  strictFieldAccess: boolean,
 ): {
   schema: Record<string, unknown>;
   data: Record<string, unknown>;
   labelSnapshots: Record<string, unknown>;
+  fieldAccess: Record<string, "read" | "edit">;
 } {
   if (!isRecord(schema) || !Array.isArray(schema.sections) || !isRecord(data))
-    return { schema: {}, data: {}, labelSnapshots: {} };
+    return { schema: {}, data: {}, labelSnapshots: {}, fieldAccess: {} };
 
   const { stages } = workflowParts(isRecord(workflow) ? workflow : {});
   const stage = stages.find((candidate) => candidate.id === stageId);
   const fieldPermissions = isRecord(stage?.fieldPermissions)
     ? stage.fieldPermissions
     : {};
-  const hiddenPaths = new Set(
-    Object.entries(fieldPermissions)
-      .filter(
-        ([, permissions]) =>
-          isRecord(permissions) && permissions[role] === "hidden",
-      )
-      .map(([path]) => path),
-  );
+  const canViewField = (path: string): boolean => {
+    const permissions = fieldPermissions[path];
+    const access = isRecord(permissions) ? permissions[role] : undefined;
+    return strictFieldAccess
+      ? access === "read" || access === "edit"
+      : access !== "hidden";
+  };
+  const projectedPaths = new Set<string>();
+  const fieldAccess: Record<string, "read" | "edit"> = {};
 
   const projectFields = (
     fields: unknown[],
@@ -97,7 +100,7 @@ function projectVisibleSubmissionData(
     fields.forEach((field) => {
       if (!isRecord(field) || typeof field.key !== "string") return;
       const path = prefix ? `${prefix}.${field.key}` : field.key;
-      if (hiddenPaths.has(path) || !Object.hasOwn(values, field.key)) return;
+      if (!canViewField(path) || !Object.hasOwn(values, field.key)) return;
       const value = values[field.key];
       if (
         field.type === "repeater" &&
@@ -105,7 +108,9 @@ function projectVisibleSubmissionData(
         Array.isArray(field.rowFields)
       ) {
         projected[field.key] = value.map((row) =>
-          isRecord(row) ? projectFields(field.rowFields as unknown[], row, path) : row,
+          isRecord(row)
+            ? projectFields(field.rowFields as unknown[], row, path)
+            : row,
         );
       } else {
         projected[field.key] = value;
@@ -118,7 +123,11 @@ function projectVisibleSubmissionData(
     fields.flatMap((field) => {
       if (!isRecord(field) || typeof field.key !== "string") return [];
       const path = prefix ? `${prefix}.${field.key}` : field.key;
-      if (hiddenPaths.has(path)) return [];
+      if (!canViewField(path)) return [];
+      projectedPaths.add(path);
+      const permissions = fieldPermissions[path];
+      fieldAccess[path] =
+        isRecord(permissions) && permissions[role] === "edit" ? "edit" : "read";
       return [
         {
           ...field,
@@ -144,13 +153,10 @@ function projectVisibleSubmissionData(
   return {
     schema: visibleSchema,
     data: projectFields(fields, data),
+    fieldAccess,
     labelSnapshots: Object.fromEntries(
       Object.entries(snapshots).filter(
-        ([path]) =>
-          !Array.from(hiddenPaths).some(
-            (hiddenPath) =>
-              path === hiddenPath || path.startsWith(`${hiddenPath}.`),
-          ),
+        ([path]) => projectedPaths.has(path.replace(/\[\d+\]/g, "")),
       ),
     ),
   };
@@ -321,6 +327,79 @@ function workflowFieldKeys(fields: unknown[], prefix = ""): string[] {
   });
 }
 
+function changedFormFieldPaths(
+  fields: unknown[],
+  previous: Record<string, unknown>,
+  changes: Record<string, unknown>,
+  prefix = "",
+): string[] {
+  return fields.flatMap((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.key !== "string") return [];
+    const key = candidate.key;
+    if (!Object.hasOwn(changes, key)) return [];
+    const path = prefix ? `${prefix}.${key}` : key;
+    const previousValue = previous[key];
+    const nextValue = changes[key];
+    if (candidate.type !== "repeater")
+      return JSON.stringify(previousValue) === JSON.stringify(nextValue)
+        ? []
+        : [path];
+    if (!Array.isArray(previousValue) || !Array.isArray(nextValue))
+      return JSON.stringify(previousValue) === JSON.stringify(nextValue)
+        ? []
+        : [path];
+    if (previousValue.length !== nextValue.length) return [path];
+    const rowFields = Array.isArray(candidate.rowFields)
+      ? candidate.rowFields
+      : [];
+    return previousValue.flatMap((previousRow, index) => {
+      const nextRow = nextValue[index];
+      if (!isRecord(previousRow) || !isRecord(nextRow))
+        return JSON.stringify(previousRow) === JSON.stringify(nextRow)
+          ? []
+          : [path];
+      return changedFormFieldPaths(
+        rowFields,
+        previousRow,
+        nextRow,
+        path,
+      );
+    });
+  });
+}
+
+function mergeFormChanges(
+  fields: unknown[],
+  previous: Record<string, unknown>,
+  changes: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...previous };
+  Object.entries(changes).forEach(([key, value]) => {
+    const field = fields.find(
+      (candidate) => isRecord(candidate) && candidate.key === key,
+    );
+    const prevArray = previous[key];
+    if (
+      !isRecord(field) ||
+      field.type !== "repeater" ||
+      !Array.isArray(prevArray) ||
+      !Array.isArray(value) ||
+      prevArray.length !== value.length
+    ) {
+      merged[key] = value;
+      return;
+    }
+    const rowFields = Array.isArray(field.rowFields) ? field.rowFields : [];
+    merged[key] = value.map((row, index) => {
+      const previousRow = prevArray[index];
+      return isRecord(previousRow) && isRecord(row)
+        ? mergeFormChanges(rowFields, previousRow, row)
+        : row;
+    });
+  });
+  return merged;
+}
+
 function schemaFieldKeys(schema: unknown, prefix = ""): string[] {
   if (!isRecord(schema) || !Array.isArray(schema.sections)) return [];
   const collect = (fields: unknown[], parent = ""): string[] =>
@@ -434,7 +513,12 @@ formsRouter.get(
         ? await db
             .select({ id: users.id, name: users.name, role: users.role })
             .from(users)
-            .where(and(inArray(users.id, departmentHeadIds), eq(users.status, "active")))
+            .where(
+              and(
+                inArray(users.id, departmentHeadIds),
+                eq(users.status, "active"),
+              ),
+            )
         : [];
       const departmentHeadById = new Map(
         departmentHeads.map((user) => [user.id, user]),
@@ -668,9 +752,19 @@ formsRouter.post(
 formsRouter.post(
   "/submissions/:id/transition",
   rateLimitFormMutation,
-  requirePermission("approve", "TSRFRequest"),
   async (req: Request, res: Response) => {
     try {
+      const canReviewSubmission = Boolean(
+        req.ability?.can("approve", "TSRFRequest") ||
+          req.ability?.can("manage", "all"),
+      );
+      const canResubmitSubmission = req.ability?.can(
+        "create",
+        "TSRFRequest",
+      );
+      if (!canReviewSubmission && !canResubmitSubmission)
+        return res.status(403).json({ error: "Forbidden" });
+
       const { toStage, comment } = req.body;
       if (typeof toStage !== "string")
         return res.status(400).json({ error: "toStage is required" });
@@ -681,7 +775,7 @@ formsRouter.post(
       if (!submission)
         return res.status(404).json({ error: "Form submission not found" });
       if (
-        !canReadAllSubmissions(req) &&
+        !canReviewSubmission &&
         submission.createdById !== req.user?.id
       )
         return res.status(404).json({ error: "Form submission not found" });
@@ -704,6 +798,21 @@ formsRouter.post(
         return res
           .status(409)
           .json({ error: "Workflow transition is not configured" });
+      const currentStage = stages.find(
+        (stage) => stage.id === submission.stage,
+      );
+      const targetStage = stages.find((stage) => stage.id === toStage);
+      const isOwnerResubmission =
+        !canReviewSubmission &&
+        submission.createdById === req.user?.id &&
+        currentStage?.statusCategory === "returned" &&
+        toStage === workflow.initialStage &&
+        targetStage?.statusCategory === "in_review";
+      if (!canReviewSubmission && !isOwnerResubmission)
+        return res.status(403).json({
+          error:
+            "Requestors may only resubmit their own returned request to its configured initial stage.",
+        });
       const allowedRoles = Array.isArray(transition.roles)
         ? transition.roles
         : typeof transition.role === "string"
@@ -718,12 +827,9 @@ formsRouter.post(
         req.user.role === "approver" &&
         submission.departmentHeadUserId !== req.user.id
       ) {
-        return res
-          .status(403)
-          .json({
-            error:
-              "Only the assigned department head can approve this request.",
-          });
+        return res.status(403).json({
+          error: "Only the assigned department head can approve this request.",
+        });
       }
 
       const currentData = parseJson(submission.dataJson);
@@ -743,7 +849,6 @@ formsRouter.post(
             fields: missing,
           });
       }
-      const targetStage = stages.find((stage) => stage.id === toStage);
       const nextStatus = targetStage?.statusCategory;
       if (
         typeof nextStatus !== "string" ||
@@ -847,6 +952,11 @@ formsRouter.patch(
       const stage = stages.find(
         (candidate) => candidate.id === submission.stage,
       );
+      const isReviewer = canReadAllSubmissions(req);
+      if (!isReviewer && stage?.statusCategory !== "returned")
+        return res.status(403).json({
+          error: "Requestors may edit only their returned submissions.",
+        });
       const stagePermissions = isRecord(stage?.fieldPermissions)
         ? stage.fieldPermissions
         : {};
@@ -855,31 +965,29 @@ formsRouter.patch(
         return res
           .status(500)
           .json({ error: "Stored submission data is invalid" });
-      const nextData = { ...previousData, ...req.body.data };
-      const changedKeys = Object.keys(req.body.data).filter(
-        (key) =>
-          JSON.stringify(previousData[key]) !==
-          JSON.stringify(req.body.data[key]),
+      const schema = parseJson(version.schemaJson);
+      const schemaFields = isRecord(schema) && Array.isArray(schema.sections)
+        ? schema.sections.flatMap((section) =>
+            isRecord(section) && Array.isArray(section.fields)
+              ? section.fields
+              : [],
+          )
+        : [];
+      const changedPaths = changedFormFieldPaths(
+        schemaFields,
+        previousData,
+        req.body.data,
+      );
+      const nextData = mergeFormChanges(
+        schemaFields,
+        previousData,
+        req.body.data,
       );
       const isAdmin = ability?.can("manage", "all") ?? false;
       if (!isAdmin) {
         const role = req.user?.role ?? "";
-        const editableKeys = new Set(
-          workflowFieldKeys(
-            isRecord(parseJson(version.schemaJson)) &&
-              Array.isArray(parseJson(version.schemaJson).sections)
-              ? (parseJson(version.schemaJson).sections as unknown[]).flatMap(
-                  (section) =>
-                    isRecord(section) && Array.isArray(section.fields)
-                      ? section.fields
-                      : [],
-                )
-              : [],
-          ),
-        );
-        const denied = changedKeys.filter((key) => {
-          if (!editableKeys.has(key)) return true;
-          const fieldPermission = stagePermissions[key];
+        const denied = changedPaths.filter((path) => {
+          const fieldPermission = stagePermissions[path];
           return !isRecord(fieldPermission) || fieldPermission[role] !== "edit";
         });
         if (denied.length)
@@ -889,7 +997,6 @@ formsRouter.patch(
           });
       }
 
-      const schema = parseJson(version.schemaJson);
       const validation = await validateFormSubmission(
         schema,
         nextData,
@@ -969,14 +1076,42 @@ formsRouter.get(
           .status(409)
           .json({ error: "Pinned form version is unavailable" });
       const formSchema = parseJson(version.schemaJson);
-      const { schema, data, labelSnapshots } = projectVisibleSubmissionData(
+      const strictFieldAccess = !canReadAllSubmissions(req);
+      const projected = projectVisibleSubmissionData(
         formSchema,
         parseJson(version.workflowJson),
         submission.stage,
         req.user?.role ?? "",
         parseJson(submission.dataJson),
         parseJson(submission.labelSnapshotsJson),
+        strictFieldAccess,
       );
+      const workflow = parseJson(version.workflowJson);
+      const { stages, transitions } = workflowParts(workflow);
+      const initialStageId =
+        typeof workflow.initialStage === "string" ? workflow.initialStage : null;
+      const initialStage = stages.find((stage) => stage.id === initialStageId);
+      const hasOwnerResubmitTransition = transitions.some((transition) => {
+        const roles = Array.isArray(transition.roles)
+          ? transition.roles
+          : typeof transition.role === "string"
+            ? [transition.role]
+            : [];
+        return (
+          transition.from === submission.stage &&
+          transition.to === initialStageId &&
+          roles.includes(req.user?.role ?? "")
+        );
+      });
+      const resubmitStage =
+        strictFieldAccess &&
+        submission.createdById === req.user?.id &&
+        stages.find((stage) => stage.id === submission.stage)?.statusCategory ===
+          "returned" &&
+        initialStage?.statusCategory === "in_review" &&
+        hasOwnerResubmitTransition
+          ? initialStageId
+          : null;
       const [departmentHead] =
         submission.departmentHeadUserId && submission.stage === "submitted"
           ? await db
@@ -1005,9 +1140,11 @@ formsRouter.get(
       res.json({
         ...submissionFields,
         ...responsibility,
-        formSchema: schema,
-        data,
-        labelSnapshots,
+        formSchema: projected.schema,
+        data: projected.data,
+        labelSnapshots: projected.labelSnapshots,
+        fieldAccess: projected.fieldAccess,
+        resubmitStage,
       });
     } catch {
       res.status(500).json({ error: "Unable to load form submission" });
@@ -1021,7 +1158,10 @@ formsRouter.get(
   async (req: Request, res: Response) => {
     try {
       const [submission] = await db
-        .select({ id: formSubmissions.id, createdById: formSubmissions.createdById })
+        .select({
+          id: formSubmissions.id,
+          createdById: formSubmissions.createdById,
+        })
         .from(formSubmissions)
         .where(eq(formSubmissions.id, String(req.params.id)));
       if (!submission)
@@ -1081,17 +1221,36 @@ formsRouter.post(
   requirePermission("manage", "FormDefinition"),
   async (req: Request, res: Response) => {
     try {
+      let targetDefinitionId = String(req.params.id);
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, targetDefinitionId));
+
+      if (!definition) {
+        // If caller passed a version ID instead of a definition ID, resolve to parent definition
+        const [matchingVersion] = await db
+          .select({ formDefinitionId: formVersions.formDefinitionId })
+          .from(formVersions)
+          .where(eq(formVersions.id, targetDefinitionId));
+        if (matchingVersion) {
+          targetDefinitionId = matchingVersion.formDefinitionId;
+        } else {
+          return res.status(404).json({ error: "Form definition not found" });
+        }
+      }
+
       const [latest] = await db
         .select({ version: max(formVersions.version) })
         .from(formVersions)
-        .where(eq(formVersions.formDefinitionId, String(req.params.id)));
+        .where(eq(formVersions.formDefinitionId, targetDefinitionId));
       const { schema, workflow = {} } = req.body;
       if (!schema) return res.status(400).json({ error: "schema is required" });
       const nextVersion = Number(latest.version ?? 0) + 1;
       const [version] = await db
         .insert(formVersions)
         .values({
-          formDefinitionId: String(req.params.id),
+          formDefinitionId: targetDefinitionId,
           version: nextVersion,
           schemaJson: JSON.stringify(schema),
           workflowJson: JSON.stringify(workflow),
@@ -1100,7 +1259,8 @@ formsRouter.post(
         .returning();
       res.status(201).json({ ...version, schema, workflow });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const message = (error as any)?.cause?.message || (error as Error).message;
+      res.status(400).json({ error: message });
     }
   },
 );

@@ -140,12 +140,10 @@ procurementRouter.patch(
         return;
       }
       if (error instanceof InvalidFulfillmentTransitionError) {
-        res
-          .status(409)
-          .json({
-            error: "Invalid fulfillment transition",
-            message: error.message,
-          });
+        res.status(409).json({
+          error: "Invalid fulfillment transition",
+          message: error.message,
+        });
         return;
       }
       res.status(500).json({ error: "Failed to update fulfillment status" });

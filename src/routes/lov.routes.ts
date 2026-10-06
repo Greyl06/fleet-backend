@@ -50,7 +50,10 @@ async function validateItemAttributes(
   }
 
   definitions.forEach((definition) => {
-    const hasValue = Object.prototype.hasOwnProperty.call(value, definition.key);
+    const hasValue = Object.prototype.hasOwnProperty.call(
+      value,
+      definition.key,
+    );
     const attributeValue = value[definition.key];
     if (definition.required && !hasValue)
       throw new Error(`Attribute "${definition.key}" is required.`);
@@ -60,7 +63,8 @@ async function validateItemAttributes(
       definition.type === "text"
         ? typeof attributeValue === "string"
         : definition.type === "number"
-          ? typeof attributeValue === "number" && Number.isFinite(attributeValue)
+          ? typeof attributeValue === "number" &&
+            Number.isFinite(attributeValue)
           : definition.type === "boolean"
             ? typeof attributeValue === "boolean"
             : definition.type === "select"
@@ -87,7 +91,8 @@ async function validateParentItem(
   parentId: unknown,
   itemId?: string,
 ): Promise<string | null> {
-  if (parentId === undefined || parentId === null || parentId === "") return null;
+  if (parentId === undefined || parentId === null || parentId === "")
+    return null;
   if (typeof parentId !== "string")
     throw new Error("Parent item ID must be a string.");
   if (!list.supportsHierarchy)
@@ -224,6 +229,30 @@ lovRouter.put(
         .returning();
       if (!list) return res.status(404).json({ error: "LOV list not found" });
       res.json(list);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
+lovRouter.delete(
+  "/lists/:id",
+  requirePermission("manage", "LovList"),
+  async (req: Request, res: Response) => {
+    try {
+      const [list] = await db
+        .select()
+        .from(lovLists)
+        .where(eq(lovLists.id, String(req.params.id)));
+      if (!list) return res.status(404).json({ error: "LOV list not found" });
+      const CORE_SYSTEM_LISTS = new Set(["DEPARTMENTS", "VEHICLE_TYPES", "MAINTENANCE_CATEGORIES", "VENDORS"]);
+      if (list.isSystem || CORE_SYSTEM_LISTS.has(list.code)) {
+        return res
+          .status(400)
+          .json({ error: "Core system reference lists cannot be deleted." });
+      }
+      await db.delete(lovLists).where(eq(lovLists.id, list.id));
+      res.json({ message: `List "${list.name}" deleted successfully`, id: list.id });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -417,6 +446,14 @@ lovRouter.delete(
   requirePermission("manage", "LovList"),
   async (req: Request, res: Response) => {
     try {
+      if (req.query.permanent === "true") {
+        const [deleted] = await db
+          .delete(lovItems)
+          .where(eq(lovItems.id, String(req.params.id)))
+          .returning();
+        if (!deleted) return res.status(404).json({ error: "LOV item not found" });
+        return res.json({ message: "LOV item permanently deleted", id: deleted.id });
+      }
       const [item] = await db
         .update(lovItems)
         .set({ status: "inactive", updatedAt: new Date() })

@@ -79,9 +79,19 @@ describe("validateFormWorkflow", () => {
       { id: "rejected", label: "Rejected", statusCategory: "rejected" },
     ],
     transitions: [
-      { from: "submitted", to: "rejected", roles: ["approver"], reasonRequired: true },
+      {
+        from: "submitted",
+        to: "rejected",
+        roles: ["approver"],
+        reasonRequired: true,
+      },
     ],
-    cutoff: { time: "16:00", timezone: "Asia/Manila", latePolicy: "flag_and_exception_approval", exceptionStage: "submitted" },
+    cutoff: {
+      time: "16:00",
+      timezone: "Asia/Manila",
+      latePolicy: "flag_and_exception_approval",
+      exceptionStage: "submitted",
+    },
   };
 
   it("accepts configured stages, authorized transitions, and cutoff policy", () => {
@@ -94,25 +104,34 @@ describe("validateFormWorkflow", () => {
     invalid.transitions[0].reasonRequired = false;
     invalid.cutoff.time = "29:90";
     invalid.stages[0].fieldPermissions = { missing: { unknown_role: "write" } };
-    expect(validateFormWorkflow(invalid, validSchema)).toEqual(expect.arrayContaining([
-      "Workflow transition 1 must contain valid roles.",
-      "Transitions to Rejected must require a reason.",
-      "Cutoff time must use 24-hour HH:MM format.",
-      'Stage "Submitted" permissions reference an unknown field.',
-      'Stage "Submitted" has an unknown field permission role.',
-      'Stage "Submitted" has an invalid field permission.',
-    ]));
+    expect(validateFormWorkflow(invalid, validSchema)).toEqual(
+      expect.arrayContaining([
+        "Workflow transition 1 must contain valid roles.",
+        "Transitions to Rejected must require a reason.",
+        "Cutoff time must use 24-hour HH:MM format.",
+        'Stage "Submitted" permissions reference an unknown field.',
+        'Stage "Submitted" has an unknown field permission role.',
+        'Stage "Submitted" has an invalid field permission.',
+      ]),
+    );
   });
 });
 
 describe("evaluateFormCutoff", () => {
   it("evaluates after-cutoff submissions in the configured timezone", () => {
     const onTime = evaluateFormCutoff(new Date("2026-10-02T07:59:00.000Z"), {
-      time: "16:00", timezone: "Asia/Manila", latePolicy: "flag",
+      time: "16:00",
+      timezone: "Asia/Manila",
+      latePolicy: "flag",
     });
-    const afterCutoff = evaluateFormCutoff(new Date("2026-10-02T08:01:00.000Z"), {
-      time: "16:00", timezone: "Asia/Manila", latePolicy: "flag",
-    });
+    const afterCutoff = evaluateFormCutoff(
+      new Date("2026-10-02T08:01:00.000Z"),
+      {
+        time: "16:00",
+        timezone: "Asia/Manila",
+        latePolicy: "flag",
+      },
+    );
     expect(onTime.isLate).toBe(false);
     expect(afterCutoff.isLate).toBe(true);
     expect(afterCutoff.reason).toContain("Asia/Manila");
@@ -124,10 +143,15 @@ describe("validateFormSubmission", () => {
     const result = await validateFormSubmission(
       validSchema,
       { department: "IT", project: "Fleet pickup" },
-      async (listCode, code) => listCode === "DEPARTMENTS" && code === "IT" ? "Information Technology" : null,
+      async (listCode, code) =>
+        listCode === "DEPARTMENTS" && code === "IT"
+          ? "Information Technology"
+          : null,
     );
     expect(result.errors).toEqual([]);
-    expect(result.labelSnapshots).toEqual({ department: { code: "IT", label: "Information Technology" } });
+    expect(result.labelSnapshots).toEqual({
+      department: { code: "IT", label: "Information Technology" },
+    });
   });
 
   it("rejects unknown fields, missing required values, and invalid LOV options", async () => {
@@ -136,11 +160,13 @@ describe("validateFormSubmission", () => {
       { department: "NO_SUCH_DEPARTMENT", unexpected: "tampered" },
       async () => null,
     );
-    expect(result.errors).toEqual(expect.arrayContaining([
-      'Unknown field "unexpected".',
-      "Project is required.",
-      'Field "department" has an invalid or inactive option.',
-    ]));
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        'Unknown field "unexpected".',
+        "Project is required.",
+        'Field "department" has an invalid or inactive option.',
+      ]),
+    );
   });
 
   it("validates active entity lookups and snapshots the entity label", async () => {
@@ -151,46 +177,85 @@ describe("validateFormSubmission", () => {
       type: "entity_lookup",
       label: "Fleet Vehicle",
       required: true,
-      dataSource: { kind: "entity", entity: "vehicles", valueField: "id", labelField: "plateNumber" },
+      dataSource: {
+        kind: "entity",
+        entity: "vehicles",
+        valueField: "id",
+        labelField: "plateNumber",
+      },
     });
     const result = await validateFormSubmission(
       schema,
       { department: "IT", project: "Request", vehicleId: "vehicle-id" },
       async () => "Information Technology",
-      async (entity, id) => entity === "vehicles" && id === "vehicle-id" ? "ABC-1234" : null,
+      async (entity, id) =>
+        entity === "vehicles" && id === "vehicle-id" ? "ABC-1234" : null,
     );
     expect(result.errors).toEqual([]);
-    expect(result.labelSnapshots.vehicleId).toEqual({ code: "vehicle-id", label: "ABC-1234" });
+    expect(result.labelSnapshots.vehicleId).toEqual({
+      code: "vehicle-id",
+      label: "ABC-1234",
+    });
   });
 
   it("rejects submitted values hidden by a matching rule and invalid repeater bounds", async () => {
     const schema = {
       ...validSchema,
-      sections: [{
-        ...validSchema.sections[0],
-        fields: [
-          ...validSchema.sections[0].fields,
-          {
-            id: "confidential", key: "confidential", type: "text", label: "Confidential",
-            rules: [{ when: { field: "department", operator: "eq", value: "IT" }, show: false }],
-          },
-          {
-            id: "passengers", key: "passengers", type: "repeater", label: "Passengers", required: true,
-            minRows: 1, maxRows: 2,
-            rowFields: [{ id: "passenger-name", key: "name", type: "text", label: "Name", required: true }],
-          },
-        ],
-      }],
+      sections: [
+        {
+          ...validSchema.sections[0],
+          fields: [
+            ...validSchema.sections[0].fields,
+            {
+              id: "confidential",
+              key: "confidential",
+              type: "text",
+              label: "Confidential",
+              rules: [
+                {
+                  when: { field: "department", operator: "eq", value: "IT" },
+                  show: false,
+                },
+              ],
+            },
+            {
+              id: "passengers",
+              key: "passengers",
+              type: "repeater",
+              label: "Passengers",
+              required: true,
+              minRows: 1,
+              maxRows: 2,
+              rowFields: [
+                {
+                  id: "passenger-name",
+                  key: "name",
+                  type: "text",
+                  label: "Name",
+                  required: true,
+                },
+              ],
+            },
+          ],
+        },
+      ],
     };
     const result = await validateFormSubmission(
       schema,
-      { department: "IT", project: "Request", confidential: "hidden", passengers: [{}, {}, {}] },
+      {
+        department: "IT",
+        project: "Request",
+        confidential: "hidden",
+        passengers: [{}, {}, {}],
+      },
       async () => "Information Technology",
     );
-    expect(result.errors).toEqual(expect.arrayContaining([
-      'Hidden field "confidential" cannot be submitted.',
-      "Passengers allows at most 2 rows.",
-      "Name is required.",
-    ]));
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        'Hidden field "confidential" cannot be submitted.',
+        "Passengers allows at most 2 rows.",
+        "Name is required.",
+      ]),
+    );
   });
 });

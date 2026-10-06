@@ -48,9 +48,33 @@ rolesRouter.get("/permissions", async (_req: Request, res: Response) => {
 });
 
 // Role catalog writes stay disabled until they can update authoritative CASL policy.
-rolesRouter.post("/permissions", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
-rolesRouter.put("/permissions/:key", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
-rolesRouter.delete("/permissions/:key", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
-rolesRouter.post("/", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
-rolesRouter.put("/:id", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
-rolesRouter.delete("/:id", requirePermission("manage", "all"), rejectUnwiredRolePolicyWrites);
+rolesRouter.post(
+  "/permissions",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);
+rolesRouter.put(
+  "/permissions/:key",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);
+rolesRouter.delete(
+  "/permissions/:key",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);
+rolesRouter.post(
+  "/",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);
+rolesRouter.put(
+  "/:id",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);
+rolesRouter.delete(
+  "/:id",
+  requirePermission("manage", "all"),
+  rejectUnwiredRolePolicyWrites,
+);

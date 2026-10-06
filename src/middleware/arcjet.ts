@@ -94,7 +94,10 @@ async function checkArcjet(
 
   if (!client) {
     if (config.env !== "production") return true;
-    logger.error({ policy }, "[Arcjet] Required production policy is not configured");
+    logger.error(
+      { policy },
+      "[Arcjet] Required production policy is not configured",
+    );
     res.status(503).json({
       error: "Service Unavailable",
       message: "Required request protection is not configured.",
@@ -115,14 +118,20 @@ async function checkArcjet(
     return true;
   } catch (error) {
     if (config.env === "production") {
-      logger.error({ error, policy }, "[Arcjet] Required production policy failed");
+      logger.error(
+        { error, policy },
+        "[Arcjet] Required production policy failed",
+      );
       res.status(503).json({
         error: "Service Unavailable",
         message: "Request protection is temporarily unavailable.",
       });
       return false;
     }
-    logger.warn({ error, policy }, "[Arcjet] Policy check failed; continuing outside production");
+    logger.warn(
+      { error, policy },
+      "[Arcjet] Policy check failed; continuing outside production",
+    );
     return true;
   }
 }
