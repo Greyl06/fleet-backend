@@ -12,6 +12,7 @@ import { lovRouter } from "./routes/lov.routes.js";
 import { formsRouter } from "./routes/forms.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { rateLimitApiWrite } from "./middleware/arcjet.js";
 import { activityAuditMiddleware } from "./middleware/activity-audit.js";
 import { config } from "./config/env.js";
 import { logger } from "./config/logger.js";
@@ -22,6 +23,7 @@ export const app = express();
 app.use(cors({ origin: config.frontendOrigin, credentials: true }));
 app.use(express.json());
 app.use(authMiddleware);
+app.use(rateLimitApiWrite);
 app.use(activityAuditMiddleware);
 
 // Health check

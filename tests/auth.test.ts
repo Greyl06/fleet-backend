@@ -20,7 +20,13 @@ import {
   users,
 } from "../src/db/schema.js";
 import { tokenHash } from "../src/services/auth.service.js";
-import { rateLimitAuthentication } from "../src/middleware/arcjet.js";
+import {
+  protectTsrfIntake,
+  rateLimitApiWrite,
+  rateLimitAuthentication,
+  rateLimitFormMutation,
+  rateLimitProcurementWrite,
+} from "../src/middleware/arcjet.js";
 
 describe("Hybrid authentication and signup approval", () => {
   beforeAll(async () => {
@@ -109,6 +115,55 @@ describe("Hybrid authentication and signup approval", () => {
     );
     expect(signupAttempt.status).toBe(200);
   });
+
+  it.skipIf(Boolean(config.arcjetKey))(
+    "fails closed for protected writes in production when Arcjet is not configured",
+    async () => {
+      const previousEnvironment = config.env;
+      config.env = "production";
+      try {
+        for (const middleware of [
+          rateLimitApiWrite,
+          protectTsrfIntake,
+          rateLimitFormMutation,
+          rateLimitProcurementWrite,
+        ]) {
+          const outcome: {
+            status: number;
+            nextCalled: boolean;
+            body?: Record<string, unknown>;
+          } = { status: 200, nextCalled: false };
+          const response = {
+            status(code: number) {
+              outcome.status = code;
+              return this;
+            },
+            json(body: Record<string, unknown>) {
+              outcome.body = body;
+              return this;
+            },
+          };
+          await middleware(
+            {
+              ip: "arcjet-test",
+              path: "/api/tsrf",
+              method: "POST",
+              body: {},
+            } as import("express").Request,
+            response as unknown as import("express").Response,
+            () => {
+              outcome.nextCalled = true;
+            },
+          );
+          expect(outcome.status).toBe(503);
+          expect(outcome.nextCalled).toBe(false);
+          expect(outcome.body?.message).toContain("protection");
+        }
+      } finally {
+        config.env = previousEnvironment;
+      }
+    },
+  );
 
   it("verifies signup email, requires admin role assignment, and enables login only after approval", async () => {
     const [reviewer] = await db

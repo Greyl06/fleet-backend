@@ -4,7 +4,7 @@ import {
   ProcurementService,
   WorkOrderNotFoundError,
 } from "../services/procurement.service.js";
-import { rateLimitPrApproval } from "../middleware/arcjet.js";
+import { rateLimitProcurementWrite } from "../middleware/arcjet.js";
 import { requirePermission } from "../middleware/auth.js";
 
 export const procurementRouter = Router();
@@ -12,6 +12,7 @@ export const procurementRouter = Router();
 // Create PR
 procurementRouter.post(
   "/pr",
+  rateLimitProcurementWrite,
   requirePermission("create", "PurchaseRequisition"),
   async (req: Request, res: Response) => {
     try {
@@ -71,7 +72,7 @@ procurementRouter.get(
 // Approve PR (Gated Spend - Protected by Arcjet rate limiting & Finance approval permission)
 procurementRouter.patch(
   "/pr/:id/approve",
-  rateLimitPrApproval,
+  rateLimitProcurementWrite,
   requirePermission("approve", "PurchaseRequisition"),
   async (req: Request, res: Response) => {
     try {
@@ -107,6 +108,7 @@ procurementRouter.get(
 // Update fulfillment status (in_maintenance -> work_completed -> vehicle_operational)
 procurementRouter.patch(
   "/orders/:id/status",
+  rateLimitProcurementWrite,
   requirePermission("update", "RepairWorkOrder"),
   async (req: Request, res: Response) => {
     try {

@@ -2,8 +2,14 @@ import { Router, Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/connection.js';
 import { departments, vehicleTypes, maintenanceCategories, vendors } from '../db/schema.js';
+import { requirePermission } from '../middleware/auth.js';
 
 export const referenceDataRouter = Router();
+
+referenceDataRouter.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  return requirePermission('manage', 'LovList')(req, res, next);
+});
 
 // ==========================================
 // DEPARTMENTS

@@ -4,6 +4,43 @@ import { app } from "../src/app.js";
 import { ensureDatabaseAndTables } from "../src/db/migrate.js";
 import { pool } from "../src/db/connection.js";
 import { randomUUID } from "node:crypto";
+import { db } from "../src/db/connection.js";
+import { lovItems, lovLists, users } from "../src/db/schema.js";
+import { eq, and } from "drizzle-orm";
+
+async function temporarilyAssignDepartmentApprover(
+  code: string,
+): Promise<() => Promise<void>> {
+  const [departmentList] = await db
+    .select({ id: lovLists.id })
+    .from(lovLists)
+    .where(eq(lovLists.code, "DEPARTMENTS"));
+  const [department] = departmentList
+    ? await db
+        .select()
+        .from(lovItems)
+        .where(
+          and(eq(lovItems.listId, departmentList.id), eq(lovItems.code, code)),
+        )
+    : [];
+  const [administrator] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, "superadmin@hulma.com"));
+  if (!department || !administrator)
+    throw new Error("Department test setup is missing seeded records.");
+  const previousApprovalUserId = department.approvalUserId;
+  await db
+    .update(lovItems)
+    .set({ approvalUserId: administrator.id })
+    .where(eq(lovItems.id, department.id));
+  return async () => {
+    await db
+      .update(lovItems)
+      .set({ approvalUserId: previousApprovalUserId })
+      .where(eq(lovItems.id, department.id));
+  };
+}
 
 describe("Fleet Backend API Integration Tests", () => {
   beforeAll(async () => {
@@ -78,6 +115,61 @@ describe("Fleet Backend API Integration Tests", () => {
     });
   });
 
+  describe("Role management authorization", () => {
+    it("should keep role policy writes admin-only and disabled until wired", async () => {
+      const mutations = () => [
+        request(app).post("/api/roles").send({ key: "test", label: "Test" }),
+        request(app).put("/api/roles/test-role").send({ label: "Test" }),
+        request(app).delete("/api/roles/test-role"),
+        request(app)
+          .post("/api/roles/permissions")
+          .send({ key: "test:permission", label: "Test" }),
+        request(app)
+          .put("/api/roles/permissions/test:permission")
+          .send({ label: "Test" }),
+        request(app).delete("/api/roles/permissions/test:permission"),
+      ];
+
+      const responses = await Promise.all(
+        mutations().map((mutation) =>
+          mutation.set("x-user-role", "department_requester"),
+        ),
+      );
+
+      expect(responses.map((response) => response.status)).toEqual(
+        Array(6).fill(403),
+      );
+
+      const adminResponses = await Promise.all(
+        mutations().map((mutation) => mutation.set("x-user-role", "admin")),
+      );
+      expect(adminResponses.map((response) => response.status)).toEqual(
+        Array(6).fill(409),
+      );
+    });
+  });
+
+  describe("Legacy reference data authorization", () => {
+    it("should deny non-admin reference data mutations", async () => {
+      const responses = await Promise.all([
+        request(app)
+          .post("/api/reference-data/vendors")
+          .set("x-user-role", "department_requester")
+          .send({ name: "Denied Vendor" }),
+        request(app)
+          .put("/api/reference-data/vendors/test-id")
+          .set("x-user-role", "department_requester")
+          .send({ name: "Denied Vendor" }),
+        request(app)
+          .delete("/api/reference-data/vendors/test-id")
+          .set("x-user-role", "department_requester"),
+      ]);
+      expect(responses.map((response) => response.status)).toEqual([
+        403, 403, 403,
+      ]);
+    });
+  });
+
   describe("Versioned Form Definitions", () => {
     it("should create a draft form and publish its version", async () => {
       const key = `test-form-${Date.now()}`;
@@ -92,10 +184,14 @@ describe("Fleet Backend API Integration Tests", () => {
       });
       expect(vehicleRes.status).toBe(201);
       const vehicleLookupRes = await request(app)
-        .get('/api/vehicles')
-        .set('x-user-role', 'department_requester');
+        .get("/api/vehicles")
+        .set("x-user-role", "department_requester");
       expect(vehicleLookupRes.status).toBe(200);
-      expect(vehicleLookupRes.body.some((vehicle: { id: string }) => vehicle.id === vehicleRes.body.id)).toBe(true);
+      expect(
+        vehicleLookupRes.body.some(
+          (vehicle: { id: string }) => vehicle.id === vehicleRes.body.id,
+        ),
+      ).toBe(true);
       const schema = {
         key,
         name: "Test Form",
@@ -139,7 +235,12 @@ describe("Fleet Backend API Integration Tests", () => {
                 label: "Fleet Vehicle",
                 section: "request",
                 required: true,
-                dataSource: { kind: "entity", entity: "vehicles", valueField: "id", labelField: "plateNumber" },
+                dataSource: {
+                  kind: "entity",
+                  entity: "vehicles",
+                  valueField: "id",
+                  labelField: "plateNumber",
+                },
                 meta: { reportable: true, pii: false },
               },
             ],
@@ -155,13 +256,21 @@ describe("Fleet Backend API Integration Tests", () => {
             statusCategory: "in_review",
             fieldPermissions: {
               project: { department_requester: "edit" },
-              dispatch_notes: { department_requester: "hidden", fleet_team: "edit" },
+              dispatch_notes: {
+                department_requester: "hidden",
+                fleet_team: "edit",
+              },
             },
           },
           { id: "rejected", label: "Rejected", statusCategory: "rejected" },
         ],
         transitions: [
-          { from: "submitted", to: "rejected", roles: ["admin"], reasonRequired: true },
+          {
+            from: "submitted",
+            to: "rejected",
+            roles: ["admin"],
+            reasonRequired: true,
+          },
         ],
       };
       const createRes = await request(app).post("/api/forms").send({
@@ -179,26 +288,65 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(publishRes.status).toBe(200);
       expect(publishRes.body.status).toBe("published");
 
+      const restoreDepartmentApprover =
+        await temporarilyAssignDepartmentApprover("IT");
       const submitRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
-        .send({ data: { department: "IT", project: "Test project", vehicleId: vehicleRes.body.id } });
+        .send({
+          data: {
+            department: "IT",
+            project: "Test project",
+            vehicleId: vehicleRes.body.id,
+          },
+        });
+      await restoreDepartmentApprover();
       expect(submitRes.status).toBe(201);
       expect(submitRes.body.formVersionId).toBe(createRes.body.version.id);
       expect(submitRes.body.stage).toBe("submitted");
-      expect(submitRes.body.labelSnapshots.department).toEqual({ code: "IT", label: "Information Technology" });
-      expect(submitRes.body.labelSnapshots.vehicleId).toEqual({ code: vehicleRes.body.id, label: plateNumber });
+      expect(submitRes.body.currentAssignee).toMatchObject({
+        name: "Super Administrator",
+        role: "admin",
+      });
+      expect(submitRes.body.currentResponsibleRoles).toContain("admin");
+      expect(submitRes.body.labelSnapshots.department).toEqual({
+        code: "IT",
+        label: "Information Technology",
+      });
+      expect(submitRes.body.labelSnapshots.vehicleId).toEqual({
+        code: vehicleRes.body.id,
+        label: plateNumber,
+      });
 
-      const reportRes = await request(app).get(`/api/forms/${key}/submissions/report`);
+      const reportRes = await request(app).get(
+        `/api/forms/${key}/submissions/report`,
+      );
       expect(reportRes.status).toBe(200);
-      expect(reportRes.body[0].data).toEqual({ department: "IT", vehicleId: vehicleRes.body.id });
+      expect(reportRes.body[0].data).toEqual({
+        department: "IT",
+        vehicleId: vehicleRes.body.id,
+      });
       expect(reportRes.body[0].data.project).toBeUndefined();
+      expect(reportRes.body[0].currentAssignee).toMatchObject({
+        name: "Super Administrator",
+        role: "admin",
+      });
+      expect(reportRes.body[0].currentResponsibleRoles).toContain("admin");
+
+      const otherRequesterReport = await request(app)
+        .get(`/api/forms/${key}/submissions/report`)
+        .set("x-user-role", "department_requester")
+        .set("x-user-id", "another-requester");
+      expect(otherRequesterReport.status).toBe(200);
+      expect(otherRequesterReport.body).toEqual([]);
 
       const requesterEdit = await request(app)
         .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
         .set("x-user-role", "department_requester")
         .send({ data: { project: "Updated project" } });
-      expect(requesterEdit.status, JSON.stringify(requesterEdit.body)).toBe(200);
+      expect(requesterEdit.status, JSON.stringify(requesterEdit.body)).toBe(
+        200,
+      );
 
       const requesterDispatchTamper = await request(app)
         .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
@@ -212,10 +360,58 @@ describe("Fleet Backend API Integration Tests", () => {
         .send({ data: { dispatch_notes: "Vehicle assigned" } });
       expect(fleetDispatchEdit.status).toBe(200);
 
+      const ownerDetail = await request(app)
+        .get(`/api/forms/submissions/${submitRes.body.id}`)
+        .set("x-user-role", "department_requester");
+      expect(ownerDetail.status).toBe(200);
+      expect(ownerDetail.body.data.project).toBe("Updated project");
+      expect(ownerDetail.body.data.dispatch_notes).toBeUndefined();
+      expect(
+        ownerDetail.body.formSchema.sections[0].fields.some(
+          (field: { key: string }) => field.key === "dispatch_notes",
+        ),
+      ).toBe(false);
+      expect(ownerDetail.body.formSchema.key).toBe(key);
+      expect(ownerDetail.body.formSchema.sections).toHaveLength(1);
+      expect(ownerDetail.body.currentAssignee).toMatchObject({
+        name: "Super Administrator",
+        role: "admin",
+      });
+      expect(ownerDetail.body.currentResponsibleRoles).toContain("admin");
+      expect(ownerDetail.body.dataJson).toBeUndefined();
+      expect(ownerDetail.body.labelSnapshotsJson).toBeUndefined();
+
+      const otherRequesterHeaders = {
+        "x-user-role": "department_requester",
+        "x-user-id": "another-requester",
+      };
+      const otherRequesterDetail = await request(app)
+        .get(`/api/forms/submissions/${submitRes.body.id}`)
+        .set(otherRequesterHeaders);
+      expect(otherRequesterDetail.status).toBe(404);
+
+      const otherRequesterEvents = await request(app)
+        .get(`/api/forms/submissions/${submitRes.body.id}/events`)
+        .set(otherRequesterHeaders);
+      expect(otherRequesterEvents.status).toBe(404);
+
+      const otherRequesterEdit = await request(app)
+        .patch(`/api/forms/submissions/${submitRes.body.id}/data`)
+        .set(otherRequesterHeaders)
+        .send({ data: { project: "Unauthorized update" } });
+      expect(otherRequesterEdit.status).toBe(404);
+
       const tamperedRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
-        .send({ data: { department: "IT", project: "Test project", vehicleId: vehicleRes.body.id, unknown_field: "tampered" } });
+        .send({
+          data: {
+            department: "IT",
+            project: "Test project",
+            vehicleId: vehicleRes.body.id,
+            unknown_field: "tampered",
+          },
+        });
       expect(tamperedRes.status).toBe(422);
 
       const unauthorizedTransition = await request(app)
@@ -231,11 +427,16 @@ describe("Fleet Backend API Integration Tests", () => {
 
       const transitionRes = await request(app)
         .post(`/api/forms/submissions/${submitRes.body.id}/transition`)
-        .send({ toStage: "rejected", comment: "Request details were incomplete" });
+        .send({
+          toStage: "rejected",
+          comment: "Request details were incomplete",
+        });
       expect(transitionRes.status).toBe(200);
       expect(transitionRes.body.status).toBe("rejected");
 
-      const eventsRes = await request(app).get(`/api/forms/submissions/${submitRes.body.id}/events`);
+      const eventsRes = await request(app).get(
+        `/api/forms/submissions/${submitRes.body.id}/events`,
+      );
       expect(eventsRes.status).toBe(200);
       expect(eventsRes.body).toHaveLength(4);
       expect(eventsRes.body[3].comment).toBe("Request details were incomplete");
@@ -249,6 +450,45 @@ describe("Fleet Backend API Integration Tests", () => {
         .send({ schema: { ...schema, version: 2 } });
       expect(draftRes.status).toBe(201);
 
+      const renamedSchema = {
+        ...schema,
+        sections: schema.sections.map((section) => ({
+          ...section,
+          fields: section.fields.map((field) =>
+            field.id === "project" ? { ...field, key: "project_title" } : field,
+          ),
+        })),
+      };
+      const renamedDraft = await request(app)
+        .put(`/api/forms/versions/${draftRes.body.id}`)
+        .send({ schema: renamedSchema, workflow });
+      expect(renamedDraft.status).toBe(200);
+      const rejectedKeyChange = await request(app).post(
+        `/api/forms/versions/${draftRes.body.id}/publish`,
+      );
+      expect(rejectedKeyChange.status).toBe(422);
+      expect(rejectedKeyChange.body.details).toContain(
+        'Published field key "project" must be retained.',
+      );
+
+      const relabeledSchema = {
+        ...schema,
+        sections: schema.sections.map((section) => ({
+          ...section,
+          fields: section.fields.map((field) =>
+            field.id === "project" ? { ...field, label: "Project Title" } : field,
+          ),
+        })),
+      };
+      const relabeledDraft = await request(app)
+        .put(`/api/forms/versions/${draftRes.body.id}`)
+        .send({ schema: relabeledSchema, workflow });
+      expect(relabeledDraft.status).toBe(200);
+      const publishedLabelChange = await request(app).post(
+        `/api/forms/versions/${draftRes.body.id}/publish`,
+      );
+      expect(publishedLabelChange.status).toBe(200);
+
       const managerRead = await request(app)
         .get(`/api/forms/${key}`)
         .set("x-user-role", "department_requester");
@@ -259,7 +499,7 @@ describe("Fleet Backend API Integration Tests", () => {
         .set("x-user-role", "department_requester");
       expect(publicRead.status).toBe(200);
       expect(publicRead.body.versions).toHaveLength(1);
-      expect(publicRead.body.versions[0].version).toBe(1);
+      expect(publicRead.body.versions[0].version).toBe(2);
     });
 
     it("should deny form management to requestors and reject invalid schemas at publish time", async () => {
@@ -355,72 +595,84 @@ describe("Fleet Backend API Integration Tests", () => {
 
   describe("Module A: TSRF Requests & 4:00 PM Cutoff", () => {
     it("should flag TSRF as isFlaggedAfterCutoff if submitted after 16:00", async () => {
-      // 16:30 submission simulation
-      const lateTime = new Date("2026-09-23T16:30:00");
-      const res = await request(app)
-        .post("/api/tsrf")
-        .send({
-          department: "IT Support",
-          projectName: "Asset Retrieval and KE Biometric Project",
-          origin: "MMG Warehouse",
-          destination: "Kingston Excell",
-          stops: [
-            {
-              stopOrder: 1,
-              locationName: "MMG Warehouse",
-              address: "Building 4, MMG Complex",
-              waitingTimeMinutes: 15,
-            },
-            {
-              stopOrder: 2,
-              locationName: "Kingston Excell",
-              address: "Kingston Industrial Park",
-              waitingTimeMinutes: 30,
-            },
-          ],
-          passengers: [
-            { name: "John Doe", department: "IT", role: "Hardware Tech" },
-            {
-              name: "Jane Smith",
-              department: "Operations",
-              role: "Asset Auditor",
-            },
-          ],
-          cargo: [
-            {
-              description: "KE Biometric Terminals",
-              quantity: 10,
-              isFragile: true,
-            },
-          ],
-          vehicleType: "commuter_van",
-          departureDate: "2026-09-24T08:00:00",
-          callTime: "07:30 AM",
-          submissionDate: lateTime.toISOString(),
-        });
+      const restoreDepartmentApprover =
+        await temporarilyAssignDepartmentApprover("IT");
+      try {
+        // 16:30 submission simulation
+        const lateTime = new Date("2026-09-23T16:30:00");
+        const res = await request(app)
+          .post("/api/tsrf")
+          .send({
+            department: "IT",
+            projectName: "Asset Retrieval and KE Biometric Project",
+            origin: "MMG Warehouse",
+            destination: "Kingston Excell",
+            stops: [
+              {
+                stopOrder: 1,
+                locationName: "MMG Warehouse",
+                address: "Building 4, MMG Complex",
+                waitingTimeMinutes: 15,
+              },
+              {
+                stopOrder: 2,
+                locationName: "Kingston Excell",
+                address: "Kingston Industrial Park",
+                waitingTimeMinutes: 30,
+              },
+            ],
+            passengers: [
+              { name: "John Doe", department: "IT", role: "Hardware Tech" },
+              {
+                name: "Jane Smith",
+                department: "Operations",
+                role: "Asset Auditor",
+              },
+            ],
+            cargo: [
+              {
+                description: "KE Biometric Terminals",
+                quantity: 10,
+                isFragile: true,
+              },
+            ],
+            vehicleType: "commuter_van",
+            departureDate: "2026-09-24T08:00:00",
+            callTime: "07:30 AM",
+            submissionDate: lateTime.toISOString(),
+          });
 
-      expect(res.status).toBe(201);
-      expect(res.body.isFlaggedAfterCutoff).toBe(true);
-      expect(res.body.cutoffReason).toContain(
-        "after the daily cut-off time (16:00)",
-      );
+        expect(res.status).toBe(201);
+        expect(res.body.isFlaggedAfterCutoff).toBe(true);
+        expect(res.body.cutoffReason).toContain(
+          "after the daily cut-off time (16:00)",
+        );
+      } finally {
+        await restoreDepartmentApprover();
+      }
     });
 
     it("should not flag TSRF if submitted before 16:00", async () => {
-      const earlyTime = new Date("2026-09-23T14:15:00");
-      const res = await request(app).post("/api/tsrf").send({
-        department: "Logistics",
-        projectName: "Regional Hub Delivery",
-        origin: "Central Depot",
-        destination: "North Hub",
-        departureDate: "2026-09-25T09:00:00",
-        callTime: "08:30 AM",
-        submissionDate: earlyTime.toISOString(),
-      });
+      const restoreDepartmentApprover =
+        await temporarilyAssignDepartmentApprover("LOG");
+      try {
+        const earlyTime = new Date("2026-09-23T14:15:00");
+        const res = await request(app).post("/api/tsrf").send({
+          department: "LOG",
+          projectName: "Regional Hub Delivery",
+          origin: "Central Depot",
+          destination: "North Hub",
+          departureDate: "2026-09-25T09:00:00",
+          callTime: "08:30 AM",
+          submissionDate: earlyTime.toISOString(),
+        });
 
-      expect(res.status).toBe(201);
-      expect(res.body.isFlaggedAfterCutoff).toBe(false);
-      expect(res.body.cutoffReason).toBeNull();
+        expect(res.status).toBe(201);
+        expect(res.body.isFlaggedAfterCutoff).toBe(false);
+        expect(res.body.cutoffReason).toBeNull();
+      } finally {
+        await restoreDepartmentApprover();
+      }
     });
   });
 
