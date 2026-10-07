@@ -417,8 +417,16 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         ('DEPARTMENTS', 'Departments', 'Organizational departments', TRUE),
         ('VEHICLE_TYPES', 'Vehicle Types', 'Fleet vehicle categories and types', TRUE),
         ('MAINTENANCE_CATEGORIES', 'Maintenance', 'Maintenance service categories', TRUE),
-        ('VENDORS', 'Vendors', 'Service providers and repair shops', TRUE)
+        ('VENDORS', 'Vendors', 'Service providers and repair shops', TRUE),
+        ('ENTITIES', 'Entities', 'Organization entities for TSRF letterheads', TRUE)
       ON CONFLICT (code) DO NOTHING;
+
+      INSERT INTO lov_items (list_id, code, label)
+      SELECT id, 'GVE', 'GVE' FROM lov_lists WHERE code = 'ENTITIES'
+      ON CONFLICT (list_id, code) DO NOTHING;
+      INSERT INTO lov_items (list_id, code, label)
+      SELECT id, 'HULMA', 'HULMA' FROM lov_lists WHERE code = 'ENTITIES'
+      ON CONFLICT (list_id, code) DO NOTHING;
 
       INSERT INTO lov_attributes (list_id, key, label, type, required, sort_order, options_json)
       SELECT id, 'head', 'Department Head', 'text', FALSE, 0, '[]' FROM lov_lists WHERE code = 'DEPARTMENTS'

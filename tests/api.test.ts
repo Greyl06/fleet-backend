@@ -70,6 +70,15 @@ describe("Fleet Backend API Integration Tests", () => {
           (list: { code: string }) => list.code === "DEPARTMENTS",
         ),
       ).toBe(true);
+      expect(
+        listsRes.body.some((list: { code: string }) => list.code === "ENTITIES"),
+      ).toBe(true);
+      const entityItemsRes = await request(app).get(
+        "/api/lov/lists/ENTITIES/items?status=active",
+      );
+      expect(entityItemsRes.body.map((item: { code: string }) => item.code)).toEqual(
+        expect.arrayContaining(["GVE", "HULMA"]),
+      );
 
       const futureCode = `FUTURE_${Date.now()}`;
       const futureItem = await request(app)
@@ -175,13 +184,11 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(missingRequiredVehicleAttribute.status).toBe(400);
 
       const hierarchyCode = `HIERARCHY_${Date.now()}`;
-      const hierarchyList = await request(app)
-        .post("/api/lov/lists")
-        .send({
-          code: hierarchyCode,
-          name: "Test Hierarchy",
-          supportsHierarchy: true,
-        });
+      const hierarchyList = await request(app).post("/api/lov/lists").send({
+        code: hierarchyCode,
+        name: "Test Hierarchy",
+        supportsHierarchy: true,
+      });
       expect(hierarchyList.status).toBe(201);
       const rootItem = await request(app)
         .post(`/api/lov/lists/${hierarchyCode}/items`)
@@ -279,7 +286,14 @@ describe("Fleet Backend API Integration Tests", () => {
         .post(importPath)
         .set("x-user-role", "admin")
         .send({
-          items: [{ code: firstCode, label: "Updated", status: "inactive", attrs: {} }],
+          items: [
+            {
+              code: firstCode,
+              label: "Updated",
+              status: "inactive",
+              attrs: {},
+            },
+          ],
         });
       expect(upsertRes.status).toBe(200);
       expect(upsertRes.body.items[0]).toMatchObject({
@@ -329,7 +343,11 @@ describe("Fleet Backend API Integration Tests", () => {
       const denied = await request(app)
         .post(importPath)
         .set("x-user-role", "department_requester")
-        .send({ items: [{ code: "DENIED", label: "Denied", status: "active", attrs: {} }] });
+        .send({
+          items: [
+            { code: "DENIED", label: "Denied", status: "active", attrs: {} },
+          ],
+        });
       expect(denied.status).toBe(403);
     });
 
@@ -387,7 +405,11 @@ describe("Fleet Backend API Integration Tests", () => {
       const department = await request(app)
         .post("/api/reference-data/departments")
         .set("x-user-role", "admin")
-        .send({ code: departmentCode, name: "Legacy Department", head: "Dept Head" });
+        .send({
+          code: departmentCode,
+          name: "Legacy Department",
+          head: "Dept Head",
+        });
       expect(department.status).toBe(201);
       expect(department.body).toMatchObject({
         code: departmentCode,
@@ -437,7 +459,11 @@ describe("Fleet Backend API Integration Tests", () => {
       const category = await request(app)
         .post("/api/reference-data/maintenance-categories")
         .set("x-user-role", "admin")
-        .send({ code: categoryCode, name: "Legacy Maintenance", description: "Legacy detail" });
+        .send({
+          code: categoryCode,
+          name: "Legacy Maintenance",
+          description: "Legacy detail",
+        });
       expect(category.status).toBe(201);
       const categoryLov = await request(app).get(
         `/api/lov/lists/MAINTENANCE_CATEGORIES/items?q=${categoryCode}`,
@@ -530,6 +556,208 @@ describe("Fleet Backend API Integration Tests", () => {
   });
 
   describe("Versioned Form Definitions", () => {
+    it("updates the assigned vehicle odometer only when dynamic TSRFs complete", async () => {
+      const key = `odometer-form-${Date.now()}`;
+      const vehicle = await request(app).post("/api/vehicles").send({
+        plateNumber: `ODOMETER-${Date.now()}`,
+        model: "Odometer Test Vehicle",
+        currentKm: 1000,
+        lastPmsKm: 0,
+        pmsIntervalKm: 5000,
+      });
+      expect(vehicle.status).toBe(201);
+
+      const createRes = await request(app)
+        .post("/api/forms")
+        .send({
+          key,
+          name: "Odometer Form",
+          schema: {
+            key,
+            name: "Odometer Form",
+            version: 1,
+            status: "draft",
+            sections: [
+              {
+                id: "trip",
+                title: "Trip",
+                fields: [
+                  {
+                    id: "assigned-vehicle",
+                    key: "assignedVehicleId",
+                    type: "entity_lookup",
+                    label: "Fleet Vehicle",
+                    section: "trip",
+                    required: true,
+                    dataSource: {
+                      kind: "entity",
+                      entity: "vehicles",
+                      valueField: "id",
+                      labelField: "plateNumber",
+                    },
+                  },
+                  {
+                    id: "ending-km",
+                    key: "endingKm",
+                    type: "number",
+                    label: "Ending Odometer (km)",
+                    section: "trip",
+                    required: true,
+                  },
+                ],
+              },
+            ],
+          },
+          workflow: {
+            initialStage: "in_progress",
+            stages: [
+              {
+                id: "in_progress",
+                label: "In Progress",
+                statusCategory: "in_progress",
+                fieldPermissions: { endingKm: { fleet_team: "edit" } },
+              },
+              { id: "completed", label: "Completed", statusCategory: "completed" },
+            ],
+            transitions: [
+              {
+                from: "in_progress",
+                to: "completed",
+                roles: ["fleet_team"],
+                requiredFields: ["endingKm"],
+              },
+            ],
+            cutoff: {
+              time: "23:59",
+              timezone: "Asia/Manila",
+              latePolicy: "flag",
+            },
+          },
+        });
+      expect(createRes.status).toBe(201);
+      const publishRes = await request(app).post(
+        `/api/forms/versions/${createRes.body.version.id}/publish`,
+      );
+      expect(publishRes.status).toBe(200);
+
+      const submission = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { assignedVehicleId: vehicle.body.id, endingKm: 5200 } });
+      expect(submission.status).toBe(201);
+      const completed = await request(app)
+        .post(`/api/forms/submissions/${submission.body.id}/transition`)
+        .set("x-user-role", "fleet_team")
+        .send({ toStage: "completed" });
+      expect(completed.status).toBe(200);
+
+      const vehicleList = await request(app)
+        .get("/api/vehicles")
+        .set("x-user-role", "fleet_team");
+      expect(
+        vehicleList.body.find((item: { id: string }) => item.id === vehicle.body.id),
+      ).toMatchObject({ currentKm: 5200, status: "pms_due" });
+
+      const lowerVehicle = await request(app).post("/api/vehicles").send({
+        plateNumber: `ODOMETER-LOW-${Date.now()}`,
+        model: "Lower Reading Test Vehicle",
+        currentKm: 1200,
+        lastPmsKm: 0,
+        pmsIntervalKm: 5000,
+      });
+      expect(lowerVehicle.status).toBe(201);
+      const lowerSubmission = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { assignedVehicleId: lowerVehicle.body.id, endingKm: 1100 } });
+      expect(lowerSubmission.status).toBe(201);
+      const rejectedDecrease = await request(app)
+        .post(`/api/forms/submissions/${lowerSubmission.body.id}/transition`)
+        .set("x-user-role", "fleet_team")
+        .send({ toStage: "completed" });
+      expect(rejectedDecrease.status).toBe(422);
+      const vehicleAfterRejectedDecrease = await request(app)
+        .get("/api/vehicles")
+        .set("x-user-role", "fleet_team");
+      expect(
+        vehicleAfterRejectedDecrease.body.find(
+          (item: { id: string }) => item.id === lowerVehicle.body.id,
+        ),
+      ).toMatchObject({ currentKm: 1200, status: "active" });
+    });
+
+    it("routes late dynamic submissions to the configured exception stage", async () => {
+      const key = `late-form-${Date.now()}`;
+      const createRes = await request(app)
+        .post("/api/forms")
+        .send({
+          key,
+          name: "Late Submission Form",
+          schema: {
+            key,
+            name: "Late Submission Form",
+            version: 1,
+            status: "draft",
+            sections: [
+              {
+                id: "request",
+                title: "Request",
+                fields: [
+                  {
+                    id: "project",
+                    key: "project",
+                    type: "text",
+                    label: "Project",
+                    section: "request",
+                    required: true,
+                  },
+                ],
+              },
+            ],
+          },
+          workflow: {
+            initialStage: "submitted",
+            stages: [
+              { id: "submitted", label: "Submitted", statusCategory: "in_review" },
+              { id: "exception_review", label: "Exception Review", statusCategory: "in_review" },
+            ],
+            transitions: [],
+            cutoff: {
+              time: "00:00",
+              timezone: "Asia/Manila",
+              latePolicy: "flag_and_exception_approval",
+              exceptionStage: "exception_review",
+            },
+          },
+        });
+      expect(createRes.status).toBe(201);
+      const publishRes = await request(app).post(
+        `/api/forms/versions/${createRes.body.version.id}/publish`,
+      );
+      expect(publishRes.status).toBe(200);
+
+      const submitRes = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { project: "Late project" } });
+      expect(submitRes.status).toBe(201);
+      expect(submitRes.body).toMatchObject({
+        stage: "exception_review",
+        status: "in_review",
+        isLate: true,
+      });
+      expect(submitRes.body.cutoffReason).toContain("Asia/Manila");
+      const events = await request(app).get(
+        `/api/forms/submissions/${submitRes.body.id}/events`,
+      );
+      expect(events.status).toBe(200);
+      expect(events.body[0]).toMatchObject({
+        fromStage: null,
+        toStage: "exception_review",
+        action: "submitted_after_cutoff",
+      });
+    });
+
     it("records form and workflow changes in Activity History without storing payloads", async () => {
       const key = `audited-form-${randomUUID()}`;
       const actorId = randomUUID();
@@ -599,13 +827,24 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(logs.status).toBe(200);
       const formLogs = logs.body
         .filter((entry: { userName: string }) => entry.userName === actorName)
-        .map((entry: { action: string; description: string; metadataJson: string }) => ({
-          ...entry,
-          metadata: JSON.parse(entry.metadataJson) as Record<string, unknown>,
-        }));
+        .map(
+          (entry: {
+            action: string;
+            description: string;
+            metadataJson: string;
+          }) => ({
+            ...entry,
+            metadata: JSON.parse(entry.metadataJson) as Record<string, unknown>,
+          }),
+        );
 
       expect(formLogs).toHaveLength(3);
-      expect(formLogs.map((entry: { metadata: Record<string, unknown> }) => entry.metadata.operation)).toEqual(
+      expect(
+        formLogs.map(
+          (entry: { metadata: Record<string, unknown> }) =>
+            entry.metadata.operation,
+        ),
+      ).toEqual(
         expect.arrayContaining([
           "form_definition_created",
           "form_draft_updated",
@@ -617,7 +856,10 @@ describe("Fleet Backend API Integration Tests", () => {
           entry.metadata.operation === "form_draft_updated",
       );
       expect(workflowEdit?.description).toContain("workflow");
-      expect(workflowEdit?.metadata).toMatchObject({ formKey: key, formVersion: 1 });
+      expect(workflowEdit?.metadata).toMatchObject({
+        formKey: key,
+        formVersion: 1,
+      });
       expect(workflowEdit?.metadata).not.toHaveProperty("schema");
       expect(workflowEdit?.metadata).not.toHaveProperty("workflow");
     });
@@ -768,6 +1010,7 @@ describe("Fleet Backend API Integration Tests", () => {
               "passengers.role": { department_requester: "read" },
             },
           },
+          { id: "cancelled", label: "Cancelled", statusCategory: "cancelled" },
         ],
         transitions: [
           {
@@ -781,6 +1024,12 @@ describe("Fleet Backend API Integration Tests", () => {
             to: "submitted",
             roles: ["department_requester"],
             action: "resubmitted",
+          },
+          {
+            from: "submitted",
+            to: "cancelled",
+            roles: ["department_requester", "admin"],
+            reasonRequired: true,
           },
         ],
       };
@@ -886,12 +1135,37 @@ describe("Fleet Backend API Integration Tests", () => {
         .get(`/api/forms/submissions/${submitRes.body.id}/events`)
         .set(ownerHeaders);
       expect(events.status).toBe(200);
-      expect(events.body.map((event: { action: string }) => event.action)).toContain(
-        "data_updated",
-      );
-      expect(events.body.map((event: { action: string }) => event.action)).toContain(
-        "resubmitted",
-      );
+      expect(
+        events.body.map((event: { action: string }) => event.action),
+      ).toContain("data_updated");
+      expect(
+        events.body.map((event: { action: string }) => event.action),
+      ).toContain("resubmitted");
+
+      const cancellationRequest = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set(ownerHeaders)
+        .send({ data: { project: "Cancellation test", passengers: [] } });
+      expect(cancellationRequest.status).toBe(201);
+      const otherOwnerCancel = await request(app)
+        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .set(otherOwnerHeaders)
+        .send({ toStage: "cancelled", comment: "Not my request" });
+      expect(otherOwnerCancel.status).toBe(404);
+      const missingCancelReason = await request(app)
+        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .set(ownerHeaders)
+        .send({ toStage: "cancelled" });
+      expect(missingCancelReason.status).toBe(400);
+      const ownerCancelled = await request(app)
+        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .set(ownerHeaders)
+        .send({ toStage: "cancelled", comment: "Trip is no longer required." });
+      expect(ownerCancelled.status).toBe(200);
+      expect(ownerCancelled.body).toMatchObject({
+        stage: "cancelled",
+        status: "cancelled",
+      });
     });
 
     it("should create a draft form and publish its version", async () => {
@@ -1182,10 +1456,9 @@ describe("Fleet Backend API Integration Tests", () => {
       const crewField = ownerDetail.body.formSchema.sections[0].fields.find(
         (field: { key: string }) => field.key === "crew",
       );
-      expect(crewField.rowFields.map((field: { key: string }) => field.key)).toEqual([
-        "name",
-        "vehicleRef",
-      ]);
+      expect(
+        crewField.rowFields.map((field: { key: string }) => field.key),
+      ).toEqual(["name", "vehicleRef"]);
       expect(ownerDetail.body.labelSnapshots.department).toBeUndefined();
       expect(ownerDetail.body.labelSnapshots.vehicleId).toBeUndefined();
       expect(ownerDetail.body.labelSnapshots["crew[0].vehicleRef"]).toEqual({
@@ -1279,7 +1552,9 @@ describe("Fleet Backend API Integration Tests", () => {
         code: historicalDepartmentCode,
         label: "Historical Department Label",
       });
-      expect(historicalDetail.body.data.department).toBe(historicalDepartmentCode);
+      expect(historicalDetail.body.data.department).toBe(
+        historicalDepartmentCode,
+      );
       const inactiveDepartmentSubmission = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")

@@ -35,6 +35,8 @@ import {
   validateFormSubmission,
   projectReportableFields,
 } from "../domain/form-definition.js";
+import { calculateOdometerUpdate } from "../domain/odometer.js";
+import { logger } from "../config/logger.js";
 
 export const formsRouter = Router();
 
@@ -742,6 +744,7 @@ formsRouter.post(
     try {
       const canReviewSubmission = Boolean(
         req.ability?.can("approve", "TSRFRequest") ||
+          req.ability?.can("update", "TSRFRequest") ||
           req.ability?.can("manage", "all"),
       );
       const canResubmitSubmission = req.ability?.can(
@@ -794,16 +797,22 @@ formsRouter.post(
         currentStage?.statusCategory === "returned" &&
         toStage === workflow.initialStage &&
         targetStage?.statusCategory === "in_review";
-      if (!canReviewSubmission && !isOwnerResubmission)
-        return res.status(403).json({
-          error:
-            "Requestors may only resubmit their own returned request to its configured initial stage.",
-        });
       const allowedRoles = Array.isArray(transition.roles)
         ? transition.roles
         : typeof transition.role === "string"
           ? [transition.role]
           : [];
+      const isOwnerCancellation =
+        !canReviewSubmission &&
+        submission.createdById === req.user?.id &&
+        req.user?.role === "department_requester" &&
+        targetStage?.statusCategory === "cancelled" &&
+        allowedRoles.includes("department_requester");
+      if (!canReviewSubmission && !isOwnerResubmission && !isOwnerCancellation)
+        return res.status(403).json({
+          error:
+            "Requestors may only resubmit their own returned request or cancel their own configured request.",
+        });
       if (!req.user || !allowedRoles.includes(req.user.role))
         return res
           .status(403)
@@ -853,7 +862,51 @@ formsRouter.post(
           .json({ error: "A reason is required for this transition" });
       }
 
-      const updated = await db.transaction(async (transaction) => {
+      const transitionResult = await db.transaction(async (transaction) => {
+        let odometerVehicleId: string | null = null;
+        let odometerUpdate: ReturnType<typeof calculateOdometerUpdate> | null =
+          null;
+        if (nextStatus === "completed" && isRecord(currentData)) {
+          const rawVehicleId =
+            currentData.assignedVehicleId ?? currentData.vehicleId;
+          const vehicleId =
+            typeof rawVehicleId === "string" ? rawVehicleId.trim() : "";
+          const rawEndingKm = currentData.endingKm;
+          const hasEndingKm =
+            rawEndingKm !== undefined &&
+            rawEndingKm !== null &&
+            rawEndingKm !== "";
+          if (vehicleId || hasEndingKm) {
+            if (!vehicleId || typeof rawEndingKm !== "number") {
+              return {
+                kind: "validation" as const,
+                message:
+                  "A fleet vehicle and numeric endingKm are both required to complete an odometer-tracked request.",
+              };
+            }
+            const [vehicle] = await transaction
+              .select()
+              .from(vehicles)
+              .where(eq(vehicles.id, vehicleId))
+              .for("update");
+            if (!vehicle) {
+              return {
+                kind: "validation" as const,
+                message: "The assigned fleet vehicle is unavailable.",
+              };
+            }
+            try {
+              odometerUpdate = calculateOdometerUpdate(vehicle, rawEndingKm);
+              odometerVehicleId = vehicle.id;
+            } catch (error) {
+              return {
+                kind: "validation" as const,
+                message: (error as Error).message,
+              };
+            }
+          }
+        }
+
         const [next] = await transaction
           .update(formSubmissions)
           .set({
@@ -868,7 +921,13 @@ formsRouter.post(
             ),
           )
           .returning();
-        if (!next) return null;
+        if (!next) return { kind: "conflict" as const };
+        if (odometerUpdate && odometerVehicleId) {
+          await transaction
+            .update(vehicles)
+            .set({ ...odometerUpdate, updatedAt: new Date() })
+            .where(eq(vehicles.id, odometerVehicleId));
+        }
         await transaction.insert(formSubmissionEvents).values({
           submissionId: submission.id,
           fromStage: submission.stage,
@@ -880,12 +939,15 @@ formsRouter.post(
           actorRole: req.user!.role,
           comment: typeof comment === "string" ? comment.trim() : null,
         });
-        return next;
+        return { kind: "success" as const, submission: next };
       });
-      if (!updated)
+      if (transitionResult.kind === "validation")
+        return res.status(422).json({ error: transitionResult.message });
+      if (transitionResult.kind === "conflict")
         return res
           .status(409)
           .json({ error: "Submission stage changed; reload and retry" });
+      const updated = transitionResult.submission;
       res.json({
         id: updated.id,
         submissionNumber: updated.submissionNumber,

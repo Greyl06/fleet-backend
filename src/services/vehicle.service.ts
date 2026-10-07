@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/connection.js';
 import { vehicles } from '../db/schema.js';
 import { getPmsStatus, isPmsOverdue } from '../domain/pms.js';
+import { calculateOdometerUpdate } from '../domain/odometer.js';
 import { logger } from '../config/logger.js';
 
 export class VehicleService {
@@ -69,32 +70,24 @@ export class VehicleService {
       throw new Error(`Vehicle with ID ${vehicleId} not found`);
     }
 
-    if (endingKm < vehicle.currentKm) {
-      throw new Error(
-        `Ending KM (${endingKm}) cannot be less than current odometer reading (${vehicle.currentKm})`,
-      );
-    }
-
-    const isOverdue = isPmsOverdue({
-      currentKm: endingKm,
-      lastCompletedPmsKm: vehicle.lastPmsKm,
-      intervalKm: vehicle.pmsIntervalKm,
-    });
-
-    const newStatus = isOverdue ? 'pms_due' : vehicle.status === 'pms_due' ? 'pms_due' : vehicle.status;
+    const odometerUpdate = calculateOdometerUpdate(vehicle, endingKm);
 
     const [updated] = await db
       .update(vehicles)
       .set({
-        currentKm: endingKm,
-        status: newStatus,
+        ...odometerUpdate,
         updatedAt: new Date(),
       })
       .where(eq(vehicles.id, vehicleId))
       .returning();
 
     logger.info(
-      { vehicleId, oldKm: vehicle.currentKm, newKm: endingKm, status: newStatus },
+      {
+        vehicleId,
+        oldKm: vehicle.currentKm,
+        newKm: endingKm,
+        status: odometerUpdate.status,
+      },
       '[VehicleService] Vehicle odometer updated',
     );
 
