@@ -4,6 +4,7 @@ import {
   validateFormSubmission,
   evaluateFormCutoff,
   validateFormWorkflow,
+  projectReportableFields,
 } from "../src/domain/form-definition.js";
 
 const validSchema = {
@@ -257,5 +258,52 @@ describe("validateFormSubmission", () => {
         "Name is required.",
       ]),
     );
+  });
+});
+
+describe("projectReportableFields", () => {
+  it("excludes top-level and nested PII from report projections", () => {
+    const schema = {
+      sections: [
+        {
+          id: "request",
+          fields: [
+            {
+              key: "project",
+              type: "text",
+              meta: { reportable: true, pii: false },
+            },
+            {
+              key: "driverMobile",
+              type: "text",
+              meta: { reportable: true, pii: true },
+            },
+            {
+              key: "passengers",
+              type: "repeater",
+              meta: { reportable: true, pii: false },
+              rowFields: [
+                { key: "name", type: "text", meta: { reportable: true, pii: true } },
+                { key: "role", type: "text", meta: { reportable: true, pii: false } },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(
+      projectReportableFields(schema, {
+        project: "Vehicle delivery",
+        driverMobile: "555-0100",
+        passengers: [
+          { name: "Passenger Name", role: "Technician" },
+          { name: "Another Passenger", role: "Auditor" },
+        ],
+      }),
+    ).toEqual({
+      project: "Vehicle delivery",
+      passengers: [{ role: "Technician" }, { role: "Auditor" }],
+    });
   });
 });
