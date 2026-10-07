@@ -18,9 +18,31 @@ function moduleForPath(path: string): string {
   return "System";
 }
 
-function actionForRequest(method: string, path: string): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function actionForRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+): string {
   if (method === "DELETE") return "Deleted";
-  if (/\/(approve|endorse|transition)(\/|$)/i.test(path)) return "Approved";
+  if (/\/transition(\/|$)/i.test(path) && isRecord(body)) {
+    const target = body.toStage;
+    const transitionActions: Record<string, string> = {
+      returned: "Returned",
+      rejected: "Rejected",
+      cancelled: "Cancelled",
+      completed: "Completed",
+      submitted: "Resubmitted",
+      approved: "Approved",
+    };
+    if (typeof target === "string") return transitionActions[target] ?? "Updated";
+  }
+  if (/\/(approve|endorse)(\/|$)/i.test(path)) {
+    return isRecord(body) && body.action === "reject" ? "Rejected" : "Approved";
+  }
   if (
     (path.startsWith("/api/tsrf") || path.startsWith("/api/forms")) &&
     method === "POST"
@@ -49,7 +71,7 @@ export function activityAuditMiddleware(
   const path = req.path;
   const method = req.method;
   const module = moduleForPath(path);
-  const action = actionForRequest(method, path);
+  const action = actionForRequest(method, path, req.body);
   res.once("finish", () => {
     if (res.statusCode < 200 || res.statusCode >= 300) return;
     void db

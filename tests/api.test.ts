@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { db } from "../src/db/connection.js";
 import { departments, lovItems, lovLists, users } from "../src/db/schema.js";
 import { eq, and } from "drizzle-orm";
+import { actionForRequest } from "../src/middleware/activity-audit.js";
 
 async function temporarilyAssignDepartmentApprover(
   code: string,
@@ -41,6 +42,20 @@ async function temporarilyAssignDepartmentApprover(
       .where(eq(lovItems.id, department.id));
   };
 }
+
+describe("Activity audit classification", () => {
+  it("describes workflow transitions without including request payload values", () => {
+    const path = "/api/forms/submissions/submission-id/transition";
+    expect(actionForRequest("POST", path, { toStage: "cancelled", comment: "Private reason" })).toBe(
+      "Cancelled",
+    );
+    expect(actionForRequest("POST", path, { toStage: "submitted" })).toBe("Resubmitted");
+    expect(actionForRequest("POST", path, { toStage: "completed" })).toBe("Completed");
+    expect(actionForRequest("POST", "/api/tsrf/request-id/endorse", { action: "reject" })).toBe(
+      "Rejected",
+    );
+  });
+});
 
 describe("Fleet Backend API Integration Tests", () => {
   beforeAll(async () => {
@@ -1166,6 +1181,26 @@ describe("Fleet Backend API Integration Tests", () => {
         stage: "cancelled",
         status: "cancelled",
       });
+      const transitionHistory = await request(app)
+        .get("/api/activity-logs?module=TSRF")
+        .set(ownerHeaders);
+      expect(transitionHistory.status).toBe(200);
+      const cancellationAudit = transitionHistory.body.find(
+        (entry: { metadataJson: string }) => {
+          const metadata = JSON.parse(entry.metadataJson) as Record<string, unknown>;
+          return (
+            metadata.actorId === ownerId &&
+            metadata.path === `/api/forms/submissions/${cancellationRequest.body.id}/transition`
+          );
+        },
+      );
+      expect(cancellationAudit).toBeDefined();
+      const cancellationMetadata = JSON.parse(cancellationAudit.metadataJson) as Record<
+        string,
+        unknown
+      >;
+      expect(cancellationMetadata).not.toHaveProperty("body");
+      expect(cancellationMetadata).not.toHaveProperty("comment");
     });
 
     it("should create a draft form and publish its version", async () => {

@@ -40,8 +40,14 @@ export async function ensureDatabaseAndTables(): Promise<void> {
 
   // Connect to target database and create tables
   const dbClient = new Client({ connectionString: config.databaseUrl });
+  let migrationLockAcquired = false;
+  const migrationLockKey = `fleet-schema-migration:${targetDb}`;
   try {
     await dbClient.connect();
+    await dbClient.query("SELECT pg_advisory_lock(hashtext($1))", [
+      migrationLockKey,
+    ]);
+    migrationLockAcquired = true;
     logger.info(`[Database] Initializing schema tables in "${targetDb}"...`);
 
     await dbClient.query(`
@@ -543,6 +549,11 @@ export async function ensureDatabaseAndTables(): Promise<void> {
     logger.error({ error: error.message }, "[Database] Migration failed");
     throw error;
   } finally {
+    if (migrationLockAcquired) {
+      await dbClient
+        .query("SELECT pg_advisory_unlock(hashtext($1))", [migrationLockKey])
+        .catch(() => {});
+    }
     await dbClient.end().catch(() => {});
   }
 }
