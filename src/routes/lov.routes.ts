@@ -259,6 +259,94 @@ lovRouter.delete(
   },
 );
 
+lovRouter.post(
+  "/lists/:code/items/import",
+  requirePermission("manage", "LovList"),
+  async (req: Request, res: Response) => {
+    try {
+      const [list] = await db
+        .select()
+        .from(lovLists)
+        .where(eq(lovLists.code, String(req.params.code)));
+      if (!list) return res.status(404).json({ error: "LOV list not found" });
+
+      const sourceRows: unknown = req.body?.items;
+      if (!Array.isArray(sourceRows) || sourceRows.length === 0)
+        return res.status(400).json({ error: "At least one import item is required." });
+      if (sourceRows.length > 1000)
+        return res.status(400).json({ error: "An import cannot exceed 1000 items." });
+
+      const seenCodes = new Set<string>();
+      const rows: Array<{
+        code: string;
+        label: string;
+        status: "active" | "inactive";
+        attrs: Record<string, unknown>;
+      }> = [];
+      for (const [index, source] of sourceRows.entries()) {
+        if (!isRecord(source))
+          return res.status(400).json({ error: `Row ${index + 2} must be an object.` });
+        const code = typeof source.code === "string" ? source.code.trim() : "";
+        const label = typeof source.label === "string" ? source.label.trim() : "";
+        if (!code || !label)
+          return res.status(400).json({ error: `Row ${index + 2} requires code and label.` });
+        if (seenCodes.has(code))
+          return res.status(400).json({ error: `Duplicate code "${code}" in import.` });
+        seenCodes.add(code);
+        if (source.status !== "active" && source.status !== "inactive")
+          return res.status(400).json({ error: `Row ${index + 2} has an invalid status.` });
+        try {
+          const attrs = await validateItemAttributes(list.id, source.attrs);
+          rows.push({ code, label, status: source.status, attrs });
+        } catch (error) {
+          return res.status(400).json({
+            error: `Row ${index + 2}: ${(error as Error).message}`,
+          });
+        }
+      }
+
+      const items = await db.transaction(async (transaction) => {
+        const imported = [];
+        for (const row of rows) {
+          const [existing] = await transaction
+            .select({ attrsJson: lovItems.attrsJson })
+            .from(lovItems)
+            .where(and(eq(lovItems.listId, list.id), eq(lovItems.code, row.code)));
+          const existingAttrs = existing ? parseJson(existing.attrsJson) : {};
+          const attrs = isRecord(existingAttrs)
+            ? { ...existingAttrs, ...row.attrs }
+            : row.attrs;
+          const [item] = await transaction
+            .insert(lovItems)
+            .values({
+              listId: list.id,
+              code: row.code,
+              label: row.label,
+              status: row.status,
+              attrsJson: JSON.stringify(attrs),
+            })
+            .onConflictDoUpdate({
+              target: [lovItems.listId, lovItems.code],
+              set: {
+                label: row.label,
+                status: row.status,
+                attrsJson: JSON.stringify(attrs),
+                updatedAt: new Date(),
+              },
+            })
+            .returning();
+          imported.push({ ...item, attrs: parseJson(item.attrsJson) });
+        }
+        return imported;
+      });
+
+      res.json({ imported: items.length, items });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  },
+);
+
 lovRouter.get("/lists/:code/items", async (req: Request, res: Response) => {
   try {
     const [list] = await db

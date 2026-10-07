@@ -5,7 +5,7 @@ import { ensureDatabaseAndTables } from "../src/db/migrate.js";
 import { pool } from "../src/db/connection.js";
 import { randomUUID } from "node:crypto";
 import { db } from "../src/db/connection.js";
-import { lovItems, lovLists, users } from "../src/db/schema.js";
+import { departments, lovItems, lovLists, users } from "../src/db/schema.js";
 import { eq, and } from "drizzle-orm";
 
 async function temporarilyAssignDepartmentApprover(
@@ -243,6 +243,235 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(deactivateRes.status).toBe(200);
       expect(deactivateRes.body.status).toBe("inactive");
     });
+
+    it("imports LOV items atomically with upsert-by-code behavior", async () => {
+      const listCode = `IMPORT_${Date.now()}`;
+      const list = await request(app)
+        .post("/api/lov/lists")
+        .set("x-user-role", "admin")
+        .send({ code: listCode, name: "Import Test List" });
+      expect(list.status).toBe(201);
+      const attribute = await request(app)
+        .post(`/api/lov/lists/${listCode}/attributes`)
+        .set("x-user-role", "admin")
+        .send({ key: "note", label: "Note", type: "text" });
+      expect(attribute.status).toBe(201);
+
+      const firstCode = `ITEM_${Date.now()}`;
+      const importPath = `/api/lov/lists/${listCode}/items/import`;
+      const createRes = await request(app)
+        .post(importPath)
+        .set("x-user-role", "admin")
+        .send({
+          items: [
+            {
+              code: firstCode,
+              label: "Initial",
+              status: "active",
+              attrs: { note: "Keep this value" },
+            },
+          ],
+        });
+      expect(createRes.status).toBe(200);
+      expect(createRes.body.imported).toBe(1);
+
+      const upsertRes = await request(app)
+        .post(importPath)
+        .set("x-user-role", "admin")
+        .send({
+          items: [{ code: firstCode, label: "Updated", status: "inactive", attrs: {} }],
+        });
+      expect(upsertRes.status).toBe(200);
+      expect(upsertRes.body.items[0]).toMatchObject({
+        code: firstCode,
+        label: "Updated",
+        status: "inactive",
+        attrs: { note: "Keep this value" },
+      });
+
+      const rollbackCode = `ROLLBACK_${Date.now()}`;
+      const invalidBatch = await request(app)
+        .post("/api/lov/lists/VEHICLE_TYPES/items/import")
+        .set("x-user-role", "admin")
+        .send({
+          items: [
+            {
+              code: rollbackCode,
+              label: "Must Roll Back",
+              status: "active",
+              attrs: { category: "light", pms_interval_km: 5000 },
+            },
+            {
+              code: `INVALID_${Date.now()}`,
+              label: "Invalid",
+              status: "active",
+              attrs: { category: "not-a-category", pms_interval_km: 5000 },
+            },
+          ],
+        });
+      expect(invalidBatch.status).toBe(400);
+      const catalog = await request(app).get(
+        `/api/lov/lists/VEHICLE_TYPES/items?q=${rollbackCode}`,
+      );
+      expect(catalog.body).toHaveLength(0);
+
+      const duplicateBatch = await request(app)
+        .post(importPath)
+        .set("x-user-role", "admin")
+        .send({
+          items: [
+            { code: "DUPLICATE", label: "One", status: "active", attrs: {} },
+            { code: "DUPLICATE", label: "Two", status: "active", attrs: {} },
+          ],
+        });
+      expect(duplicateBatch.status).toBe(400);
+
+      const denied = await request(app)
+        .post(importPath)
+        .set("x-user-role", "department_requester")
+        .send({ items: [{ code: "DENIED", label: "Denied", status: "active", attrs: {} }] });
+      expect(denied.status).toBe(403);
+    });
+
+    it("backfills inactive legacy catalog rows without duplicating on startup", async () => {
+      const code = `INACTIVE_BACKFILL_${Date.now()}`;
+      await db.insert(departments).values({
+        code,
+        name: "Inactive Backfill Department",
+        head: "Historical Head",
+        isActive: false,
+      });
+
+      await ensureDatabaseAndTables();
+      const [departmentList] = await db
+        .select({ id: lovLists.id })
+        .from(lovLists)
+        .where(eq(lovLists.code, "DEPARTMENTS"));
+      const backfilledItems = await db
+        .select()
+        .from(lovItems)
+        .where(
+          and(eq(lovItems.listId, departmentList.id), eq(lovItems.code, code)),
+        );
+      expect(backfilledItems).toHaveLength(1);
+      expect(backfilledItems[0]).toMatchObject({
+        label: "Inactive Backfill Department",
+        status: "inactive",
+      });
+      expect(JSON.parse(backfilledItems[0].attrsJson)).toEqual({
+        head: "Historical Head",
+      });
+
+      await db
+        .update(lovItems)
+        .set({ label: "Canonical LOV Edit" })
+        .where(eq(lovItems.id, backfilledItems[0].id));
+      await db
+        .update(departments)
+        .set({ name: "Stale Legacy Label" })
+        .where(eq(departments.code, code));
+      await ensureDatabaseAndTables();
+      const repeatedItems = await db
+        .select()
+        .from(lovItems)
+        .where(
+          and(eq(lovItems.listId, departmentList.id), eq(lovItems.code, code)),
+        );
+      expect(repeatedItems).toHaveLength(1);
+      expect(repeatedItems[0].status).toBe("inactive");
+      expect(repeatedItems[0].label).toBe("Canonical LOV Edit");
+    });
+
+    it("keeps legacy reference-data routes mapped to canonical LOV items", async () => {
+      const departmentCode = `LEGACY_DEPT_${Date.now()}`;
+      const department = await request(app)
+        .post("/api/reference-data/departments")
+        .set("x-user-role", "admin")
+        .send({ code: departmentCode, name: "Legacy Department", head: "Dept Head" });
+      expect(department.status).toBe(201);
+      expect(department.body).toMatchObject({
+        code: departmentCode,
+        name: "Legacy Department",
+        head: "Dept Head",
+        isActive: true,
+      });
+      const departmentLov = await request(app).get(
+        `/api/lov/lists/DEPARTMENTS/items?q=${departmentCode}`,
+      );
+      expect(departmentLov.body[0]).toMatchObject({
+        code: departmentCode,
+        label: "Legacy Department",
+        attrs: { head: "Dept Head" },
+      });
+
+      const updatedDepartment = await request(app)
+        .put(`/api/reference-data/departments/${department.body.id}`)
+        .set("x-user-role", "admin")
+        .send({ head: "Updated Head" });
+      expect(updatedDepartment.status).toBe(200);
+      const departmentList = await request(app).get(
+        `/api/lov/lists/DEPARTMENTS/items?q=${departmentCode}`,
+      );
+      expect(departmentList.body[0].attrs.head).toBe("Updated Head");
+
+      const vehicleCode = `LEGACY_VEHICLE_${Date.now()}`;
+      const vehicle = await request(app)
+        .post("/api/reference-data/vehicle-types")
+        .set("x-user-role", "admin")
+        .send({
+          code: vehicleCode,
+          label: "Legacy Vehicle",
+          category: "heavy",
+          pmsIntervalKm: 7500,
+        });
+      expect(vehicle.status).toBe(201);
+      const vehicleLov = await request(app).get(
+        `/api/lov/lists/VEHICLE_TYPES/items?q=${vehicleCode}`,
+      );
+      expect(vehicleLov.body[0].attrs).toMatchObject({
+        category: "heavy",
+        pms_interval_km: 7500,
+      });
+
+      const categoryCode = `LEGACY_MAINT_${Date.now()}`;
+      const category = await request(app)
+        .post("/api/reference-data/maintenance-categories")
+        .set("x-user-role", "admin")
+        .send({ code: categoryCode, name: "Legacy Maintenance", description: "Legacy detail" });
+      expect(category.status).toBe(201);
+      const categoryLov = await request(app).get(
+        `/api/lov/lists/MAINTENANCE_CATEGORIES/items?q=${categoryCode}`,
+      );
+      expect(categoryLov.body[0].attrs.description).toBe("Legacy detail");
+
+      const vendorName = `Legacy Vendor ${Date.now()}`;
+      const vendor = await request(app)
+        .post("/api/reference-data/vendors")
+        .set("x-user-role", "admin")
+        .send({ name: vendorName, phone: "123", specialization: "Service" });
+      expect(vendor.status).toBe(201);
+      const vendorCode = vendorName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+      const vendorLov = await request(app).get(
+        `/api/lov/lists/VENDORS/items?q=${vendorCode}`,
+      );
+      expect(vendorLov.body[0].attrs).toMatchObject({
+        phone: "123",
+        specialization: "Service",
+      });
+
+      const deactivated = await request(app)
+        .delete(`/api/reference-data/departments/${department.body.id}`)
+        .set("x-user-role", "admin");
+      expect(deactivated.status).toBe(200);
+      const activeDepartments = await request(app).get(
+        `/api/lov/lists/DEPARTMENTS/items?status=active&q=${departmentCode}`,
+      );
+      expect(activeDepartments.body).toHaveLength(0);
+      const historicalDepartment = await request(app).get(
+        `/api/lov/lists/DEPARTMENTS/items?q=${departmentCode}`,
+      );
+      expect(historicalDepartment.body[0].status).toBe("inactive");
+    });
   });
 
   describe("Role management authorization", () => {
@@ -301,6 +530,174 @@ describe("Fleet Backend API Integration Tests", () => {
   });
 
   describe("Versioned Form Definitions", () => {
+    it("records form and workflow changes in Activity History without storing payloads", async () => {
+      const key = `audited-form-${randomUUID()}`;
+      const actorId = randomUUID();
+      const actorName = `Form Auditor ${randomUUID()}`;
+      const headers = {
+        "x-user-role": "admin",
+        "x-user-id": actorId,
+        "x-user-name": actorName,
+      };
+      const schema = {
+        key,
+        name: "Audited TSRF Form",
+        version: 1,
+        status: "draft",
+        sections: [
+          {
+            id: "request",
+            title: "Request",
+            fields: [
+              {
+                id: "project",
+                key: "project",
+                type: "text",
+                label: "Project",
+                section: "request",
+              },
+            ],
+          },
+        ],
+      };
+      const workflow = {
+        initialStage: "submitted",
+        stages: [
+          { id: "submitted", label: "Submitted", statusCategory: "in_review" },
+        ],
+        transitions: [],
+      };
+      const created = await request(app)
+        .post("/api/forms")
+        .set(headers)
+        .send({ key, name: schema.name, schema, workflow });
+      expect(created.status).toBe(201);
+
+      const updatedWorkflow = {
+        ...workflow,
+        stages: [
+          {
+            ...workflow.stages[0],
+            fieldPermissions: { project: { department_requester: "edit" } },
+          },
+        ],
+      };
+      const updated = await request(app)
+        .put(`/api/forms/versions/${created.body.version.id}`)
+        .set(headers)
+        .send({ schema, workflow: updatedWorkflow });
+      expect(updated.status).toBe(200);
+
+      const published = await request(app)
+        .post(`/api/forms/versions/${created.body.version.id}/publish`)
+        .set(headers);
+      expect(published.status).toBe(200);
+
+      const logs = await request(app)
+        .get("/api/activity-logs?module=Form Builder")
+        .set(headers);
+      expect(logs.status).toBe(200);
+      const formLogs = logs.body
+        .filter((entry: { userName: string }) => entry.userName === actorName)
+        .map((entry: { action: string; description: string; metadataJson: string }) => ({
+          ...entry,
+          metadata: JSON.parse(entry.metadataJson) as Record<string, unknown>,
+        }));
+
+      expect(formLogs).toHaveLength(3);
+      expect(formLogs.map((entry: { metadata: Record<string, unknown> }) => entry.metadata.operation)).toEqual(
+        expect.arrayContaining([
+          "form_definition_created",
+          "form_draft_updated",
+          "form_version_published",
+        ]),
+      );
+      const workflowEdit = formLogs.find(
+        (entry: { metadata: Record<string, unknown> }) =>
+          entry.metadata.operation === "form_draft_updated",
+      );
+      expect(workflowEdit?.description).toContain("workflow");
+      expect(workflowEdit?.metadata).toMatchObject({ formKey: key, formVersion: 1 });
+      expect(workflowEdit?.metadata).not.toHaveProperty("schema");
+      expect(workflowEdit?.metadata).not.toHaveProperty("workflow");
+    });
+
+    it("validates versioned driver lookups against active driver users", async () => {
+      const driverOptions = await request(app)
+        .get("/api/users/drivers")
+        .set("x-user-role", "department_requester");
+      expect(driverOptions.status).toBe(200);
+      expect(driverOptions.body.length).toBeGreaterThan(0);
+      expect(driverOptions.body[0]).toEqual({
+        id: expect.any(String),
+        name: expect.any(String),
+      });
+      const driverId = driverOptions.body[0].id as string;
+      const key = `driver-form-${randomUUID()}`;
+      const schema = {
+        key,
+        name: "Driver Lookup Form",
+        version: 1,
+        status: "draft",
+        sections: [
+          {
+            id: "dispatch",
+            title: "Dispatch",
+            fields: [
+              {
+                id: "driver",
+                key: "driverId",
+                type: "entity_lookup",
+                label: "Assigned Driver",
+                section: "dispatch",
+                required: true,
+                dataSource: {
+                  kind: "entity",
+                  entity: "drivers",
+                  valueField: "id",
+                  labelField: "name",
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const workflow = {
+        initialStage: "submitted",
+        stages: [
+          { id: "submitted", label: "Submitted", statusCategory: "in_review" },
+        ],
+        transitions: [],
+      };
+      const created = await request(app)
+        .post("/api/forms")
+        .send({ key, name: schema.name, schema, workflow });
+      expect(created.status).toBe(201);
+      const published = await request(app).post(
+        `/api/forms/versions/${created.body.version.id}/publish`,
+      );
+      expect(published.status).toBe(200);
+
+      const submitted = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { driverId } });
+      expect(submitted.status).toBe(201);
+      expect(submitted.body.labelSnapshots.driverId).toEqual({
+        code: driverId,
+        label: driverOptions.body[0].name,
+      });
+
+      const invalidDriver = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { driverId: randomUUID() } });
+      expect(invalidDriver.status).toBe(422);
+      expect(invalidDriver.body.details).toContain(
+        'Field "driverId" has an invalid or unavailable entity.',
+      );
+    });
+
     it("allows only the owner to edit and resubmit a returned submission", async () => {
       const key = `returned-form-${Date.now()}`;
       const ownerId = `returned-owner-${Date.now()}`;
@@ -678,14 +1075,23 @@ describe("Fleet Backend API Integration Tests", () => {
         'Field "department" has an invalid or inactive option.',
       );
 
+      const historicalDepartmentCode = `HISTORICAL_${Date.now()}`;
+      const historicalDepartment = await request(app)
+        .post("/api/lov/lists/DEPARTMENTS/items")
+        .send({
+          code: historicalDepartmentCode,
+          label: "Historical Department Label",
+          attrs: { head: "Historical Head" },
+        });
+      expect(historicalDepartment.status).toBe(201);
       const restoreDepartmentApprover =
-        await temporarilyAssignDepartmentApprover("IT");
+        await temporarilyAssignDepartmentApprover(historicalDepartmentCode);
       const submitRes = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
         .send({
           data: {
-            department: "IT",
+            department: historicalDepartmentCode,
             project: "Test project",
             vehicleId: vehicleRes.body.id,
             crew: [
@@ -707,8 +1113,8 @@ describe("Fleet Backend API Integration Tests", () => {
       });
       expect(submitRes.body.currentResponsibleRoles).toContain("admin");
       expect(submitRes.body.labelSnapshots.department).toEqual({
-        code: "IT",
-        label: "Information Technology",
+        code: historicalDepartmentCode,
+        label: "Historical Department Label",
       });
       expect(submitRes.body.labelSnapshots.vehicleId).toEqual({
         code: vehicleRes.body.id,
@@ -720,7 +1126,7 @@ describe("Fleet Backend API Integration Tests", () => {
       );
       expect(reportRes.status).toBe(200);
       expect(reportRes.body[0].data).toEqual({
-        department: "IT",
+        department: historicalDepartmentCode,
         vehicleId: vehicleRes.body.id,
       });
       expect(reportRes.body[0].data.project).toBeUndefined();
@@ -860,6 +1266,31 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(eventsRes.status).toBe(200);
       expect(eventsRes.body).toHaveLength(3);
       expect(eventsRes.body[2].comment).toBe("Request details were incomplete");
+
+      const deactivateDepartment = await request(app)
+        .delete(`/api/lov/items/${historicalDepartment.body.id}`)
+        .set("x-user-role", "admin");
+      expect(deactivateDepartment.status).toBe(200);
+      const historicalDetail = await request(app)
+        .get(`/api/forms/submissions/${submitRes.body.id}`)
+        .set("x-user-role", "admin");
+      expect(historicalDetail.status).toBe(200);
+      expect(historicalDetail.body.labelSnapshots.department).toEqual({
+        code: historicalDepartmentCode,
+        label: "Historical Department Label",
+      });
+      expect(historicalDetail.body.data.department).toBe(historicalDepartmentCode);
+      const inactiveDepartmentSubmission = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({
+          data: {
+            department: historicalDepartmentCode,
+            project: "Should fail",
+            vehicleId: vehicleRes.body.id,
+          },
+        });
+      expect(inactiveDepartmentSubmission.status).toBe(422);
 
       const getRes = await request(app).get(`/api/forms/${key}`);
       expect(getRes.status).toBe(200);

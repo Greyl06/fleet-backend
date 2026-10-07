@@ -498,20 +498,24 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       ON CONFLICT (name) DO NOTHING;
 
       -- Backfill LOV items after legacy catalogs are seeded, including on the first startup.
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, d.code, d.name, json_build_object('head', d.head)::text
+      INSERT INTO lov_items (list_id, code, label, status, attrs_json)
+      SELECT l.id, d.code, d.name, CASE WHEN d.is_active THEN 'active' ELSE 'inactive' END,
+        json_build_object('head', d.head)::text
       FROM departments d CROSS JOIN lov_lists l WHERE l.code = 'DEPARTMENTS'
       ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, v.code, v.label, json_build_object('category', v.category, 'pms_interval_km', v.pms_interval_km)::text
+      INSERT INTO lov_items (list_id, code, label, status, attrs_json)
+      SELECT l.id, v.code, v.label, CASE WHEN v.is_active THEN 'active' ELSE 'inactive' END,
+        json_build_object('category', v.category, 'pms_interval_km', v.pms_interval_km)::text
       FROM vehicle_types_ref v CROSS JOIN lov_lists l WHERE l.code = 'VEHICLE_TYPES'
       ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
-      SELECT l.id, c.code, c.name, json_build_object('description', c.description)::text
+      INSERT INTO lov_items (list_id, code, label, status, attrs_json)
+      SELECT l.id, c.code, c.name, CASE WHEN c.is_active THEN 'active' ELSE 'inactive' END,
+        json_build_object('description', c.description)::text
       FROM maintenance_categories c CROSS JOIN lov_lists l WHERE l.code = 'MAINTENANCE_CATEGORIES'
       ON CONFLICT (list_id, code) DO NOTHING;
-      INSERT INTO lov_items (list_id, code, label, attrs_json)
+      INSERT INTO lov_items (list_id, code, label, status, attrs_json)
       SELECT l.id, upper(regexp_replace(v.name, '[^A-Za-z0-9]+', '_', 'g')), v.name,
+        CASE WHEN v.is_active THEN 'active' ELSE 'inactive' END,
         json_build_object('contact_person', v.contact_person, 'phone', v.phone, 'specialization', v.specialization)::text
       FROM vendors v CROSS JOIN lov_lists l WHERE l.code = 'VENDORS'
       ON CONFLICT (list_id, code) DO NOTHING;
