@@ -46,14 +46,23 @@ async function temporarilyAssignDepartmentApprover(
 describe("Activity audit classification", () => {
   it("describes workflow transitions without including request payload values", () => {
     const path = "/api/forms/submissions/submission-id/transition";
-    expect(actionForRequest("POST", path, { toStage: "cancelled", comment: "Private reason" })).toBe(
-      "Cancelled",
+    expect(
+      actionForRequest("POST", path, {
+        toStage: "cancelled",
+        comment: "Private reason",
+      }),
+    ).toBe("Cancelled");
+    expect(actionForRequest("POST", path, { toStage: "submitted" })).toBe(
+      "Resubmitted",
     );
-    expect(actionForRequest("POST", path, { toStage: "submitted" })).toBe("Resubmitted");
-    expect(actionForRequest("POST", path, { toStage: "completed" })).toBe("Completed");
-    expect(actionForRequest("POST", "/api/tsrf/request-id/endorse", { action: "reject" })).toBe(
-      "Rejected",
+    expect(actionForRequest("POST", path, { toStage: "completed" })).toBe(
+      "Completed",
     );
+    expect(
+      actionForRequest("POST", "/api/tsrf/request-id/endorse", {
+        action: "reject",
+      }),
+    ).toBe("Rejected");
   });
 });
 
@@ -86,14 +95,16 @@ describe("Fleet Backend API Integration Tests", () => {
         ),
       ).toBe(true);
       expect(
-        listsRes.body.some((list: { code: string }) => list.code === "ENTITIES"),
+        listsRes.body.some(
+          (list: { code: string }) => list.code === "ENTITIES",
+        ),
       ).toBe(true);
       const entityItemsRes = await request(app).get(
         "/api/lov/lists/ENTITIES/items?status=active",
       );
-      expect(entityItemsRes.body.map((item: { code: string }) => item.code)).toEqual(
-        expect.arrayContaining(["GVE", "HULMA"]),
-      );
+      expect(
+        entityItemsRes.body.map((item: { code: string }) => item.code),
+      ).toEqual(expect.arrayContaining(["GVE", "HULMA"]));
 
       const futureCode = `FUTURE_${Date.now()}`;
       const futureItem = await request(app)
@@ -635,13 +646,15 @@ describe("Fleet Backend API Integration Tests", () => {
 
     it("updates the assigned vehicle odometer only when dynamic TSRFs complete", async () => {
       const key = `odometer-form-${Date.now()}`;
-      const vehicle = await request(app).post("/api/vehicles").send({
-        plateNumber: `ODOMETER-${Date.now()}`,
-        model: "Odometer Test Vehicle",
-        currentKm: 1000,
-        lastPmsKm: 0,
-        pmsIntervalKm: 5000,
-      });
+      const vehicle = await request(app)
+        .post("/api/vehicles")
+        .send({
+          plateNumber: `ODOMETER-${Date.now()}`,
+          model: "Odometer Test Vehicle",
+          currentKm: 1000,
+          lastPmsKm: 0,
+          pmsIntervalKm: 5000,
+        });
       expect(vehicle.status).toBe(201);
 
       const createRes = await request(app)
@@ -694,7 +707,11 @@ describe("Fleet Backend API Integration Tests", () => {
                 statusCategory: "in_progress",
                 fieldPermissions: { endingKm: { fleet_team: "edit" } },
               },
-              { id: "completed", label: "Completed", statusCategory: "completed" },
+              {
+                id: "completed",
+                label: "Completed",
+                statusCategory: "completed",
+              },
             ],
             transitions: [
               {
@@ -732,21 +749,27 @@ describe("Fleet Backend API Integration Tests", () => {
         .get("/api/vehicles")
         .set("x-user-role", "fleet_team");
       expect(
-        vehicleList.body.find((item: { id: string }) => item.id === vehicle.body.id),
+        vehicleList.body.find(
+          (item: { id: string }) => item.id === vehicle.body.id,
+        ),
       ).toMatchObject({ currentKm: 5200, status: "pms_due" });
 
-      const lowerVehicle = await request(app).post("/api/vehicles").send({
-        plateNumber: `ODOMETER-LOW-${Date.now()}`,
-        model: "Lower Reading Test Vehicle",
-        currentKm: 1200,
-        lastPmsKm: 0,
-        pmsIntervalKm: 5000,
-      });
+      const lowerVehicle = await request(app)
+        .post("/api/vehicles")
+        .send({
+          plateNumber: `ODOMETER-LOW-${Date.now()}`,
+          model: "Lower Reading Test Vehicle",
+          currentKm: 1200,
+          lastPmsKm: 0,
+          pmsIntervalKm: 5000,
+        });
       expect(lowerVehicle.status).toBe(201);
       const lowerSubmission = await request(app)
         .post(`/api/forms/${key}/submissions`)
         .set("x-user-role", "department_requester")
-        .send({ data: { assignedVehicleId: lowerVehicle.body.id, endingKm: 1100 } });
+        .send({
+          data: { assignedVehicleId: lowerVehicle.body.id, endingKm: 1100 },
+        });
       expect(lowerSubmission.status).toBe(201);
       const rejectedDecrease = await request(app)
         .post(`/api/forms/submissions/${lowerSubmission.body.id}/transition`)
@@ -795,8 +818,16 @@ describe("Fleet Backend API Integration Tests", () => {
           workflow: {
             initialStage: "submitted",
             stages: [
-              { id: "submitted", label: "Submitted", statusCategory: "in_review" },
-              { id: "exception_review", label: "Exception Review", statusCategory: "in_review" },
+              {
+                id: "submitted",
+                label: "Submitted",
+                statusCategory: "in_review",
+              },
+              {
+                id: "exception_review",
+                label: "Exception Review",
+                statusCategory: "in_review",
+              },
             ],
             transitions: [],
             cutoff: {
@@ -1225,17 +1256,23 @@ describe("Fleet Backend API Integration Tests", () => {
         .send({ data: { project: "Cancellation test", passengers: [] } });
       expect(cancellationRequest.status).toBe(201);
       const otherOwnerCancel = await request(app)
-        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .post(
+          `/api/forms/submissions/${cancellationRequest.body.id}/transition`,
+        )
         .set(otherOwnerHeaders)
         .send({ toStage: "cancelled", comment: "Not my request" });
       expect(otherOwnerCancel.status).toBe(404);
       const missingCancelReason = await request(app)
-        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .post(
+          `/api/forms/submissions/${cancellationRequest.body.id}/transition`,
+        )
         .set(ownerHeaders)
         .send({ toStage: "cancelled" });
       expect(missingCancelReason.status).toBe(400);
       const ownerCancelled = await request(app)
-        .post(`/api/forms/submissions/${cancellationRequest.body.id}/transition`)
+        .post(
+          `/api/forms/submissions/${cancellationRequest.body.id}/transition`,
+        )
         .set(ownerHeaders)
         .send({ toStage: "cancelled", comment: "Trip is no longer required." });
       expect(ownerCancelled.status).toBe(200);
@@ -1249,18 +1286,21 @@ describe("Fleet Backend API Integration Tests", () => {
       expect(transitionHistory.status).toBe(200);
       const cancellationAudit = transitionHistory.body.find(
         (entry: { metadataJson: string }) => {
-          const metadata = JSON.parse(entry.metadataJson) as Record<string, unknown>;
+          const metadata = JSON.parse(entry.metadataJson) as Record<
+            string,
+            unknown
+          >;
           return (
             metadata.actorId === ownerId &&
-            metadata.path === `/api/forms/submissions/${cancellationRequest.body.id}/transition`
+            metadata.path ===
+              `/api/forms/submissions/${cancellationRequest.body.id}/transition`
           );
         },
       );
       expect(cancellationAudit).toBeDefined();
-      const cancellationMetadata = JSON.parse(cancellationAudit.metadataJson) as Record<
-        string,
-        unknown
-      >;
+      const cancellationMetadata = JSON.parse(
+        cancellationAudit.metadataJson,
+      ) as Record<string, unknown>;
       expect(cancellationMetadata).not.toHaveProperty("body");
       expect(cancellationMetadata).not.toHaveProperty("comment");
     });
@@ -1420,6 +1460,33 @@ describe("Fleet Backend API Integration Tests", () => {
       );
       expect(publishRes.status).toBe(200);
       expect(publishRes.body.status).toBe("published");
+
+      // Verify that deleting a published version is blocked
+      const deletePublishedRes = await request(app).delete(
+        `/api/forms/versions/${createRes.body.version.id}`,
+      );
+      expect(deletePublishedRes.status).toBe(400);
+
+      // Create a draft version v2
+      const createdDraftRes = await request(app)
+        .post(`/api/forms/${createRes.body.id}/versions`)
+        .send({ schema, workflow });
+      expect(createdDraftRes.status).toBe(201);
+      expect(createdDraftRes.body.version).toBe(2);
+      expect(createdDraftRes.body.status).toBe("draft");
+
+      // Successfully delete the draft version
+      const deleteDraftRes = await request(app).delete(
+        `/api/forms/versions/${createdDraftRes.body.id}`,
+      );
+      expect(deleteDraftRes.status).toBe(200);
+      expect(deleteDraftRes.body.success).toBe(true);
+
+      // Verify draft is deleted and not found anymore
+      const deleteAgainRes = await request(app).delete(
+        `/api/forms/versions/${createdDraftRes.body.id}`,
+      );
+      expect(deleteAgainRes.status).toBe(404);
 
       const futureDepartmentCode = `FUTURE_SUBMIT_${Date.now()}`;
       const futureDepartment = await request(app)

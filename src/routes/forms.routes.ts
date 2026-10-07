@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import {
+  activityLogs,
   formDefinitions,
   formSubmissionEvents,
   formSubmissions,
@@ -47,6 +48,47 @@ const parseJson = (value: string) => {
     return {};
   }
 };
+
+async function recordFormBuilderActivity(
+  req: Request,
+  entry: {
+    action: string;
+    operation: string;
+    description: string;
+    formDefinitionId: string;
+    formKey: string;
+    formName: string;
+    formVersion: number;
+    changedAreas?: string;
+  },
+): Promise<void> {
+  if (!req.user) return;
+  try {
+    await db.insert(activityLogs).values({
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: entry.action,
+      module: "Form Builder",
+      description: entry.description,
+      severity: "success",
+      metadataJson: JSON.stringify({
+        actorId: req.user.id,
+        area: "form_builder",
+        operation: entry.operation,
+        formDefinitionId: entry.formDefinitionId,
+        formKey: entry.formKey,
+        formName: entry.formName,
+        formVersion: entry.formVersion,
+        ...(entry.changedAreas ? { changedAreas: entry.changedAreas } : {}),
+      }),
+    });
+  } catch (error) {
+    logger.error(
+      { error, operation: entry.operation },
+      "Unable to persist form builder activity",
+    );
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -157,8 +199,8 @@ function projectVisibleSubmissionData(
     data: projectFields(fields, data),
     fieldAccess,
     labelSnapshots: Object.fromEntries(
-      Object.entries(snapshots).filter(
-        ([path]) => projectedPaths.has(path.replace(/\[\d+\]/g, "")),
+      Object.entries(snapshots).filter(([path]) =>
+        projectedPaths.has(path.replace(/\[\d+\]/g, "")),
       ),
     ),
   };
@@ -240,6 +282,19 @@ async function resolveActiveEntityLabel(
   entity: string,
   id: string,
 ): Promise<string | null> {
+  if (entity === "drivers") {
+    const [driver] = await db
+      .select({ name: users.name })
+      .from(users)
+      .where(
+        and(
+          eq(users.id, id),
+          eq(users.role, "driver"),
+          eq(users.status, "active"),
+        ),
+      );
+    return driver?.name ?? null;
+  }
   if (entity !== "vehicles") return null;
   const [vehicle] = await db
     .select({ plateNumber: vehicles.plateNumber })
@@ -402,12 +457,7 @@ function changedFormFieldPaths(
         return JSON.stringify(previousRow) === JSON.stringify(nextRow)
           ? []
           : [path];
-      return changedFormFieldPaths(
-        rowFields,
-        previousRow,
-        nextRow,
-        path,
-      );
+      return changedFormFieldPaths(rowFields, previousRow, nextRow, path);
     });
   });
 }
@@ -815,13 +865,10 @@ formsRouter.post(
     try {
       const canReviewSubmission = Boolean(
         req.ability?.can("approve", "TSRFRequest") ||
-          req.ability?.can("update", "TSRFRequest") ||
-          req.ability?.can("manage", "all"),
+        req.ability?.can("update", "TSRFRequest") ||
+        req.ability?.can("manage", "all"),
       );
-      const canResubmitSubmission = req.ability?.can(
-        "create",
-        "TSRFRequest",
-      );
+      const canResubmitSubmission = req.ability?.can("create", "TSRFRequest");
       if (!canReviewSubmission && !canResubmitSubmission)
         return res.status(403).json({ error: "Forbidden" });
 
@@ -834,10 +881,7 @@ formsRouter.post(
         .where(eq(formSubmissions.id, String(req.params.id)));
       if (!submission)
         return res.status(404).json({ error: "Form submission not found" });
-      if (
-        !canReviewSubmission &&
-        submission.createdById !== req.user?.id
-      )
+      if (!canReviewSubmission && submission.createdById !== req.user?.id)
         return res.status(404).json({ error: "Form submission not found" });
       const [version] = await db
         .select()
@@ -1085,13 +1129,14 @@ formsRouter.patch(
           .status(500)
           .json({ error: "Stored submission data is invalid" });
       const schema = parseJson(version.schemaJson);
-      const schemaFields = isRecord(schema) && Array.isArray(schema.sections)
-        ? schema.sections.flatMap((section) =>
-            isRecord(section) && Array.isArray(section.fields)
-              ? section.fields
-              : [],
-          )
-        : [];
+      const schemaFields =
+        isRecord(schema) && Array.isArray(schema.sections)
+          ? schema.sections.flatMap((section) =>
+              isRecord(section) && Array.isArray(section.fields)
+                ? section.fields
+                : [],
+            )
+          : [];
       const changedPaths = changedFormFieldPaths(
         schemaFields,
         previousData,
@@ -1208,7 +1253,9 @@ formsRouter.get(
       const workflow = parseJson(version.workflowJson);
       const { stages, transitions } = workflowParts(workflow);
       const initialStageId =
-        typeof workflow.initialStage === "string" ? workflow.initialStage : null;
+        typeof workflow.initialStage === "string"
+          ? workflow.initialStage
+          : null;
       const initialStage = stages.find((stage) => stage.id === initialStageId);
       const hasOwnerResubmitTransition = transitions.some((transition) => {
         const roles = Array.isArray(transition.roles)
@@ -1225,8 +1272,8 @@ formsRouter.get(
       const resubmitStage =
         strictFieldAccess &&
         submission.createdById === req.user?.id &&
-        stages.find((stage) => stage.id === submission.stage)?.statusCategory ===
-          "returned" &&
+        stages.find((stage) => stage.id === submission.stage)
+          ?.statusCategory === "returned" &&
         initialStage?.statusCategory === "in_review" &&
         hasOwnerResubmitTransition
           ? initialStageId
@@ -1326,6 +1373,15 @@ formsRouter.post(
           status: "draft",
         })
         .returning();
+      await recordFormBuilderActivity(req, {
+        action: "Created",
+        operation: "form_definition_created",
+        description: `Created form definition "${name}" (${key}), draft v${version.version}.`,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: definition.name,
+        formVersion: version.version,
+      });
       res
         .status(201)
         .json({ ...definition, version: { ...version, schema, workflow } });
@@ -1359,6 +1415,13 @@ formsRouter.post(
         }
       }
 
+      const [targetDefinition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, targetDefinitionId));
+      if (!targetDefinition)
+        return res.status(404).json({ error: "Form definition not found" });
+
       const [latest] = await db
         .select({ version: max(formVersions.version) })
         .from(formVersions)
@@ -1376,9 +1439,19 @@ formsRouter.post(
           status: "draft",
         })
         .returning();
+      await recordFormBuilderActivity(req, {
+        action: "Created",
+        operation: "form_draft_created",
+        description: `Created draft v${version.version} of form "${targetDefinition.name}" (${targetDefinition.key}).`,
+        formDefinitionId: targetDefinition.id,
+        formKey: targetDefinition.key,
+        formName: targetDefinition.name,
+        formVersion: version.version,
+      });
       res.status(201).json({ ...version, schema, workflow });
     } catch (error) {
-      const message = (error as any)?.cause?.message || (error as Error).message;
+      const message =
+        (error as any)?.cause?.message || (error as Error).message;
       res.status(400).json({ error: message });
     }
   },
@@ -1390,11 +1463,35 @@ formsRouter.put(
   async (req: Request, res: Response) => {
     try {
       const { schema, workflow } = req.body;
+      const [draft] = await db
+        .select()
+        .from(formVersions)
+        .where(
+          and(
+            eq(formVersions.id, String(req.params.id)),
+            eq(formVersions.status, "draft"),
+          ),
+        );
+      if (!draft)
+        return res.status(404).json({ error: "Draft form version not found" });
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, draft.formDefinitionId));
+      if (!definition)
+        return res.status(404).json({ error: "Form definition not found" });
+      const nextWorkflow = workflow ?? {};
+      const changedAreas = [
+        ...(draft.schemaJson === JSON.stringify(schema) ? [] : ["schema"]),
+        ...(draft.workflowJson === JSON.stringify(nextWorkflow)
+          ? []
+          : ["workflow"]),
+      ];
       const [version] = await db
         .update(formVersions)
         .set({
           schemaJson: JSON.stringify(schema),
-          workflowJson: JSON.stringify(workflow ?? {}),
+          workflowJson: JSON.stringify(nextWorkflow),
           updatedAt: new Date(),
         })
         .where(
@@ -1406,7 +1503,72 @@ formsRouter.put(
         .returning();
       if (!version)
         return res.status(404).json({ error: "Draft form version not found" });
-      res.json({ ...version, schema, workflow: workflow ?? {} });
+      if (changedAreas.length > 0) {
+        await recordFormBuilderActivity(req, {
+          action: "Updated",
+          operation: "form_draft_updated",
+          description: `Updated ${changedAreas.join(" and ")} on draft v${version.version} of form "${definition.name}" (${definition.key}).`,
+          formDefinitionId: definition.id,
+          formKey: definition.key,
+          formName: definition.name,
+          formVersion: version.version,
+          changedAreas: changedAreas.join(","),
+        });
+      }
+      res.json({ ...version, schema, workflow: nextWorkflow });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
+formsRouter.delete(
+  "/versions/:id",
+  requirePermission("manage", "FormDefinition"),
+  async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.id);
+      const [targetVersion] = await db
+        .select()
+        .from(formVersions)
+        .where(eq(formVersions.id, versionId));
+
+      if (!targetVersion) {
+        return res.status(404).json({ error: "Form version not found" });
+      }
+
+      if (targetVersion.status !== "draft") {
+        return res.status(400).json({
+          error:
+            "Only draft form versions can be deleted. Published and archived versions must be preserved for audit history.",
+        });
+      }
+
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, targetVersion.formDefinitionId));
+
+      await db.delete(formVersions).where(eq(formVersions.id, targetVersion.id));
+
+      if (definition) {
+        await recordFormBuilderActivity(req, {
+          action: "Deleted",
+          operation: "form_draft_deleted",
+          description: `Deleted draft v${targetVersion.version} of form "${definition.name}" (${definition.key}).`,
+          formDefinitionId: definition.id,
+          formKey: definition.key,
+          formName: definition.name,
+          formVersion: targetVersion.version,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Draft v${targetVersion.version} deleted successfully.`,
+        deletedVersion: targetVersion.version,
+        formDefinitionId: targetVersion.formDefinitionId,
+      });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -1429,6 +1591,12 @@ formsRouter.post(
         );
       if (!draft)
         return res.status(404).json({ error: "Draft form version not found" });
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, draft.formDefinitionId));
+      if (!definition)
+        return res.status(404).json({ error: "Form definition not found" });
       const availableLists = await db
         .select({ code: lovLists.code })
         .from(lovLists)
@@ -1493,6 +1661,15 @@ formsRouter.post(
         })
         .where(eq(formVersions.id, draft.id))
         .returning();
+      await recordFormBuilderActivity(req, {
+        action: "Published",
+        operation: "form_version_published",
+        description: `Published v${published.version} of form "${definition.name}" (${definition.key}).`,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: definition.name,
+        formVersion: published.version,
+      });
       res.json({
         ...published,
         schema: parseJson(published.schemaJson),
