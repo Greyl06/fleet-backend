@@ -571,6 +571,68 @@ describe("Fleet Backend API Integration Tests", () => {
   });
 
   describe("Versioned Form Definitions", () => {
+    it("rejects requestor-submitted values for fields hidden at the initial stage", async () => {
+      const key = `hidden-field-${Date.now()}`;
+      const createRes = await request(app)
+        .post("/api/forms")
+        .send({
+          key,
+          name: "Hidden Field Form",
+          schema: {
+            key,
+            name: "Hidden Field Form",
+            version: 1,
+            status: "draft",
+            sections: [
+              {
+                id: "trip",
+                title: "Trip",
+                fields: [
+                  {
+                    id: "ending-km",
+                    key: "endingKm",
+                    type: "number",
+                    label: "Ending Odometer (km)",
+                    section: "trip",
+                  },
+                ],
+              },
+            ],
+          },
+          workflow: {
+            initialStage: "submitted",
+            stages: [
+              {
+                id: "submitted",
+                label: "Submitted",
+                statusCategory: "in_review",
+                fieldPermissions: { endingKm: { department_requester: "hidden" } },
+              },
+            ],
+            transitions: [],
+            cutoff: {
+              time: "23:59",
+              timezone: "Asia/Manila",
+              latePolicy: "flag",
+            },
+          },
+        });
+      expect(createRes.status).toBe(201);
+      const publishRes = await request(app).post(
+        `/api/forms/versions/${createRes.body.version.id}/publish`,
+      );
+      expect(publishRes.status).toBe(200);
+
+      const submission = await request(app)
+        .post(`/api/forms/${key}/submissions`)
+        .set("x-user-role", "department_requester")
+        .send({ data: { endingKm: 999999 } });
+      expect(submission.status).toBe(422);
+      expect(submission.body.details).toContain(
+        'Hidden field "endingKm" cannot be submitted.',
+      );
+    });
+
     it("updates the assigned vehicle odometer only when dynamic TSRFs complete", async () => {
       const key = `odometer-form-${Date.now()}`;
       const vehicle = await request(app).post("/api/vehicles").send({

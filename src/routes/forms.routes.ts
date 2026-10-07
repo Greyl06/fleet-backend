@@ -262,6 +262,62 @@ function workflowParts(workflow: Record<string, unknown>) {
   return { stages, transitions };
 }
 
+function findHiddenSubmissionFields(
+  schema: unknown,
+  workflow: unknown,
+  stageId: string,
+  role: string,
+  data: unknown,
+): string[] {
+  if (!isRecord(schema) || !Array.isArray(schema.sections) || !isRecord(data))
+    return [];
+  const { stages } = workflowParts(isRecord(workflow) ? workflow : {});
+  const stage = stages.find((candidate) => candidate.id === stageId);
+  const permissions = isRecord(stage?.fieldPermissions)
+    ? stage.fieldPermissions
+    : {};
+  const hidden: string[] = [];
+  const hasValue = (value: unknown) =>
+    value !== undefined &&
+    value !== null &&
+    value !== "" &&
+    (!Array.isArray(value) || value.length > 0) &&
+    (!isRecord(value) || Object.keys(value).length > 0);
+  const visit = (
+    fields: unknown[],
+    values: Record<string, unknown>,
+    prefix = "",
+  ) => {
+    fields.forEach((field) => {
+      if (!isRecord(field) || typeof field.key !== "string") return;
+      const path = prefix ? `${prefix}.${field.key}` : field.key;
+      const fieldPermissions = permissions[path];
+      const access = isRecord(fieldPermissions) ? fieldPermissions[role] : undefined;
+      const value = values[field.key];
+      if (access === "hidden" && hasValue(value)) {
+        hidden.push(path);
+        return;
+      }
+      if (
+        field.type === "repeater" &&
+        Array.isArray(value) &&
+        Array.isArray(field.rowFields)
+      ) {
+        value.forEach((row) => {
+          if (isRecord(row)) visit(field.rowFields as unknown[], row, path);
+        });
+      }
+    });
+  };
+  visit(
+    schema.sections.flatMap((section) =>
+      isRecord(section) && Array.isArray(section.fields) ? section.fields : [],
+    ),
+    data,
+  );
+  return hidden;
+}
+
 function currentSubmissionResponsibility(
   stageId: string,
   status: string,
@@ -659,6 +715,21 @@ formsRouter.post(
         cutoffPolicy.exceptionStage
           ? cutoffPolicy.exceptionStage
           : normalInitialStage;
+      const hiddenFields = findHiddenSubmissionFields(
+        schema,
+        workflow,
+        initialStage,
+        req.user?.role ?? "",
+        data,
+      );
+      if (hiddenFields.length > 0)
+        return res.status(422).json({
+          error:
+            "Submission contains fields hidden for this role at the initial stage.",
+          details: hiddenFields.map(
+            (field) => `Hidden field "${field}" cannot be submitted.`,
+          ),
+        });
       const initialStageConfig = stages.find(
         (stage) => stage.id === initialStage,
       );
