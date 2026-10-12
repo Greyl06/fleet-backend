@@ -20,6 +20,7 @@ import {
   users,
 } from "../src/db/schema.js";
 import { tokenHash } from "../src/services/auth.service.js";
+import { defineAbilityFor, type Role } from "../src/auth/abilities.js";
 import {
   protectTsrfIntake,
   rateLimitApiWrite,
@@ -29,6 +30,20 @@ import {
 } from "../src/middleware/arcjet.js";
 
 describe("Hybrid authentication and signup approval", () => {
+  it("restricts audit history to admins and read-only auditors", async () => {
+    for (const role of ["admin", "auditor", "finance", "approver", "fleet_team", "department_requester", "driver", "procurement"] as Role[]) {
+      const ability = defineAbilityFor({ id: "policy-check", name: "Policy Check", role });
+      expect(ability.can("read", "AuditLog")).toBe(role === "admin" || role === "auditor");
+      const response = await request(app).get("/api/activity-logs").set("x-user-role", role);
+      expect(response.status).toBe(role === "admin" || role === "auditor" ? 200 : 403);
+    }
+    const auditor = defineAbilityFor({ id: "auditor", name: "Auditor", role: "auditor" });
+    expect(auditor.can("read", "SubmissionReport")).toBe(true);
+    expect(auditor.can("read", "TSRFRequest")).toBe(false);
+    expect(auditor.can("approve", "TSRFRequest")).toBe(false);
+    expect(auditor.can("manage", "all")).toBe(false);
+  });
+
   beforeAll(async () => {
     await ensureDatabaseAndTables();
   });

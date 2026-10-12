@@ -11,6 +11,7 @@ export type Role =
   | "approver"
   | "department_requester"
   | "driver"
+  | "auditor"
   | "admin";
 
 export type Action =
@@ -30,6 +31,8 @@ export type Subject =
   | "TSRFRequest"
   | "IncidentReport"
   | "FormDefinition"
+  | "AuditLog"
+  | "SubmissionReport"
   | "LovList";
 
 export type AppAbility = MongoAbility<[Action, Subject]>;
@@ -57,6 +60,7 @@ export function mapInternalRole(role: string): Role | null {
     approver: "approver",
     department_requester: "department_requester",
     driver: "driver",
+    auditor: "auditor",
   };
   return roleMap[role] ?? null;
 }
@@ -119,10 +123,18 @@ export function defineAbilityFor(user: AuthUser): AppAbility {
       can("read", "TSRFRequest");
       break;
 
+    case "auditor":
+      can("read", "AuditLog");
+      can("read", "SubmissionReport");
+      break;
+
     default:
       can("read", "Vehicle");
       break;
   }
 
+  if (user.role !== "admin" && user.role !== "auditor") {
+    cannot("read", "AuditLog");
+  }
   return build();
 }

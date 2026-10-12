@@ -5,6 +5,15 @@ import { logger } from "../config/logger.js";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+function isFormBuilderMutation(method: string, path: string): boolean {
+  return (
+    (method === "POST" && path === "/api/forms") ||
+    (method === "POST" && /^\/api\/forms\/[^/]+\/versions$/.test(path)) ||
+    (method === "PUT" && /^\/api\/forms\/versions\/[^/]+$/.test(path)) ||
+    (method === "POST" && /^\/api\/forms\/versions\/[^/]+\/publish$/.test(path))
+  );
+}
+
 function moduleForPath(path: string): string {
   if (path.startsWith("/api/vehicles")) return "Fleet";
   if (path.startsWith("/api/tsrf")) return "TSRF";
@@ -38,7 +47,8 @@ export function actionForRequest(
       submitted: "Resubmitted",
       approved: "Approved",
     };
-    if (typeof target === "string") return transitionActions[target] ?? "Updated";
+    if (typeof target === "string")
+      return transitionActions[target] ?? "Updated";
   }
   if (/\/(approve|endorse)(\/|$)/i.test(path)) {
     return isRecord(body) && body.action === "reject" ? "Rejected" : "Approved";
@@ -61,6 +71,8 @@ export function activityAuditMiddleware(
     !MUTATING_METHODS.has(req.method) ||
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/activity-logs") ||
+    req.path.startsWith("/api/reports") ||
+    isFormBuilderMutation(req.method, req.path) ||
     !req.user
   ) {
     next();
@@ -88,6 +100,11 @@ export function activityAuditMiddleware(
           method,
           path,
           statusCode: res.statusCode,
+          ...(/^\/api\/forms\/submissions\/([^/]+)/.test(path) ? {
+            recordType: "form_submission",
+            submissionId: path.split("/")[4],
+            recordId: path.split("/")[4],
+          } : {}),
         }),
       })
       .catch((error: unknown) => {

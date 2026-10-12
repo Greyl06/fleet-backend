@@ -5,9 +5,10 @@ import { ensureDatabaseAndTables } from "../src/db/migrate.js";
 import { pool } from "../src/db/connection.js";
 import { randomUUID } from "node:crypto";
 import { db } from "../src/db/connection.js";
-import { departments, lovItems, lovLists, users } from "../src/db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { departments, lovItems, lovLists, users, formDefinitions, formVersions, formSubmissions, formSubmissionEvents } from "../src/db/schema.js";
+import { eq, and, sql } from "drizzle-orm";
 import { actionForRequest } from "../src/middleware/activity-audit.js";
+import { csvCell, manilaDateBoundary, reportQuerySchema } from "../src/domain/reporting.js";
 
 async function temporarilyAssignDepartmentApprover(
   code: string,
@@ -44,6 +45,15 @@ async function temporarilyAssignDepartmentApprover(
 }
 
 describe("Activity audit classification", () => {
+  it("validates Manila calendar ranges and neutralizes spreadsheet formulas", () => {
+    expect(reportQuerySchema.safeParse({ from: "2026-02-30" }).success).toBe(false);
+    expect(reportQuerySchema.safeParse({ from: "2026-10-13", to: "2026-10-12" }).success).toBe(false);
+    expect(reportQuerySchema.safeParse({ pageSize: "101" }).success).toBe(false);
+    expect(manilaDateBoundary("2026-10-12").toISOString()).toBe("2026-10-11T16:00:00.000Z");
+    expect(manilaDateBoundary("2026-10-12", true).toISOString()).toBe("2026-10-12T16:00:00.000Z");
+    expect(csvCell(" =HYPERLINK(\"evil\")")).toBe('"\' =HYPERLINK(""evil"")"');
+    expect(csvCell("hello,\"world\"\nnext")).toBe('"hello,""world""\nnext"');
+  });
   it("describes workflow transitions without including request payload values", () => {
     const path = "/api/forms/submissions/submission-id/transition";
     expect(
@@ -67,6 +77,84 @@ describe("Activity audit classification", () => {
 });
 
 describe("Fleet Backend API Integration Tests", () => {
+  it("reports beyond 500 records with scoped privacy, evidence and audited CSV", async () => {
+    const key = `REPORT_${randomUUID()}`;
+    const [definition] = await db.insert(formDefinitions).values({ key, name: "Reporting regression" }).returning();
+    const schema = { sections: [{ id: "main", fields: [
+      { key: "public", label: "Public", type: "text", meta: { reportable: true } },
+      { key: "hidden", label: "Hidden", type: "text", meta: { reportable: true } },
+      { key: "phone", label: "Phone", type: "text", meta: { reportable: true, pii: true } },
+      { key: "crew", label: "Crew", type: "repeater", meta: { reportable: true }, rowFields: [
+        { key: "name", label: "Name", type: "text", meta: { reportable: true, pii: true } },
+        { key: "role", label: "Role", type: "text", meta: { reportable: true } },
+      ] },
+    ] }] };
+    const workflow = { stages: [{ id: "submitted", fieldPermissions: { public: { department_requester: "read" }, hidden: { admin: "hidden", auditor: "hidden", department_requester: "hidden" } } }], transitions: [{ from: "submitted", to: "completed", roles: ["fleet_team"] }] };
+    const [version] = await db.insert(formVersions).values({ formDefinitionId: definition.id, version: 1, schemaJson: JSON.stringify(schema), workflowJson: JSON.stringify(workflow), status: "published" }).returning();
+    try {
+      const created = await db.insert(formSubmissions).values(Array.from({ length: 501 }, (_, index) => ({
+        submissionNumber: `${key}-${index}`, formVersionId: version.id, stage: "submitted", status: "in_review" as const,
+        createdById: index === 0 ? "report-owner" : "other-owner", createdByName: "Requestor", createdByRole: "department_requester",
+        dataJson: JSON.stringify({ public: "=SUM(1,2)", hidden: "hidden-secret", phone: "pii-secret", crew: [{ name: "passenger-secret", role: "Technician" }] }),
+        labelSnapshotsJson: JSON.stringify({ public: { code: "saved", label: "Historical Label" }, hidden: { label: "hidden-label" } }),
+        createdAt: new Date(index === 0 ? "2026-10-11T16:00:00Z" : "2026-10-12T15:59:59Z"), isLate: index === 0,
+      }))).returning({ id: formSubmissions.id });
+      await db.insert(formSubmissionEvents).values({ submissionId: created[0].id, toStage: "submitted", action: "submitted", actorId: "report-owner", actorName: "Requestor", actorRole: "department_requester", comment: "private-comment" });
+      const filters = { formKey: key, from: "2026-10-12", to: "2026-10-12", pageSize: "100" };
+      const report = await request(app).get("/api/reports/submissions").set("x-user-role", "auditor").query(filters);
+      expect(report.status).toBe(200);
+      expect(report.body.meta.total).toBe(501);
+      expect(report.body.rows).toHaveLength(100);
+      expect(report.body.summary).toMatchObject({ pending: 501, late: 1 });
+      expect(report.body.rows[0].data).toEqual({ public: "=SUM(1,2)", crew: [{ role: "Technician" }] });
+      expect(report.body.rows[0].labels).toEqual({ public: "Historical Label" });
+      const lastPage = await request(app).get("/api/reports/submissions").set("x-user-role", "auditor").query({ ...filters, page: "6" });
+      expect(lastPage.body.rows).toHaveLength(1);
+      const owner = await request(app).get("/api/reports/submissions").set("x-user-role", "department_requester").set("x-user-id", "report-owner").query(filters);
+      expect(owner.body.meta).toMatchObject({ total: 1, scope: "own" });
+      expect(owner.body.rows[0].data).toEqual({ public: "=SUM(1,2)" });
+      const events = await request(app).get(`/api/reports/submissions/${created[0].id}/events`).set("x-user-role", "auditor");
+      expect(events.status).toBe(200);
+      expect(events.body[0].action).toBe("submitted");
+      expect(events.body[0].comment).toBeUndefined();
+      const denied = await request(app).get(`/api/reports/submissions/${created[0].id}/events`).set("x-user-role", "department_requester").set("x-user-id", "other-owner");
+      expect(denied.status).toBe(404);
+      const legacy = await request(app).get(`/api/forms/${key}/submissions/report`);
+      expect(JSON.stringify(legacy.body)).not.toContain("hidden-secret");
+      const exported = await request(app).post("/api/reports/submissions/export").set("x-user-role", "auditor").send(filters);
+      expect(exported.status).toBe(200);
+      expect(exported.type).toBe("text/csv");
+      expect(exported.text.split("\r\n")).toHaveLength(503);
+      expect(exported.text).not.toMatch(/hidden-secret|pii-secret|passenger-secret|private-comment/);
+      const audit = await request(app).get("/api/reports/activity").set("x-user-role", "auditor").query({ module: "Reports", action: "Exported" });
+      expect(audit.status).toBe(200);
+      expect(audit.body.rows[0].action).toBe("Exported");
+      expect(audit.body.rows[0].metadataJson).toBeUndefined();
+      expect((await request(app).get("/api/reports/activity").set("x-user-role", "finance")).status).toBe(403);
+      expect((await request(app).get("/api/reports/submissions").query({ from: "2026-02-30" })).status).toBe(400);
+      expect((await request(app).post("/api/forms").set("x-user-role", "auditor").send({})).status).toBe(403);
+      expect((await request(app).get("/api/reports/submissions").set("x-user-role", "procurement")).status).toBe(403);
+      const afterRange = await request(app).get("/api/reports/submissions").query({ formKey: key, from: "2026-10-13", to: "2026-10-13" });
+      expect(afterRange.body.meta.total).toBe(0);
+      const signupOptions = await request(app).get("/api/auth/signup/options");
+      expect(signupOptions.body.roles.some((role: { key: string }) => role.key === "auditor")).toBe(false);
+      for (let batch = 0; batch < 10; batch += 1) {
+        await db.insert(formSubmissions).values(Array.from({ length: 950 }, (_, index) => ({
+          submissionNumber: `${key}-limit-${batch}-${index}`, formVersionId: version.id, stage: "submitted", dataJson: "{}",
+          createdById: "limit-test", createdByName: "Limit Test", createdByRole: "department_requester", createdAt: new Date("2026-10-12T12:00:00Z"),
+        })));
+      }
+      const oversized = await request(app).post("/api/reports/submissions/export").set("x-user-role", "auditor").send(filters);
+      expect(oversized.status).toBe(422);
+      expect(oversized.body.error).toContain("10,000");
+    } finally {
+      await db.delete(formSubmissionEvents).where(sql`submission_id in (select id from form_submissions where form_version_id = ${version.id})`);
+      await db.delete(formSubmissions).where(eq(formSubmissions.formVersionId, version.id));
+      await db.delete(formVersions).where(eq(formVersions.id, version.id));
+      await db.delete(formDefinitions).where(eq(formDefinitions.id, definition.id));
+    }
+  }, 30000);
+
   beforeAll(async () => {
     await ensureDatabaseAndTables();
   });
@@ -1280,9 +1368,13 @@ describe("Fleet Backend API Integration Tests", () => {
         stage: "cancelled",
         status: "cancelled",
       });
-      const transitionHistory = await request(app)
+      const deniedTransitionHistory = await request(app)
         .get("/api/activity-logs?module=TSRF")
         .set(ownerHeaders);
+      expect(deniedTransitionHistory.status).toBe(403);
+      const transitionHistory = await request(app)
+        .get("/api/activity-logs?module=TSRF")
+        .set("x-user-role", "admin");
       expect(transitionHistory.status).toBe(200);
       const cancellationAudit = transitionHistory.body.find(
         (entry: { metadataJson: string }) => {
@@ -1781,6 +1873,34 @@ describe("Fleet Backend API Integration Tests", () => {
       );
       expect(publishedLabelChange.status).toBe(200);
 
+      // Verify unconfirmed retirement is rejected, while confirmed retirement succeeds
+      const draft3Res = await request(app)
+        .post(`/api/forms/${createRes.body.id}/versions`)
+        .send({
+          schema: {
+            ...schema,
+            version: 3,
+            sections: schema.sections.map((section) => ({
+              ...section,
+              fields: section.fields.filter((f) => f.id !== "dispatch-notes"),
+            })),
+          },
+          workflow,
+        });
+      expect(draft3Res.status).toBe(201);
+
+      const unconfirmedRetire = await request(app).post(
+        `/api/forms/versions/${draft3Res.body.id}/publish`,
+      );
+      expect(unconfirmedRetire.status).toBe(422);
+      expect(unconfirmedRetire.body.canRetire).toBe(true);
+
+      const confirmedRetire = await request(app)
+        .post(`/api/forms/versions/${draft3Res.body.id}/publish`)
+        .send({ confirmRetiredKeys: ["dispatch_notes"] });
+      expect(confirmedRetire.status).toBe(200);
+      expect(confirmedRetire.body.retiredKeys).toContain("dispatch_notes");
+
       const managerRead = await request(app)
         .get(`/api/forms/${key}`)
         .set("x-user-role", "department_requester");
@@ -1791,7 +1911,7 @@ describe("Fleet Backend API Integration Tests", () => {
         .set("x-user-role", "department_requester");
       expect(publicRead.status).toBe(200);
       expect(publicRead.body.versions).toHaveLength(1);
-      expect(publicRead.body.versions[0].version).toBe(2);
+      expect(publicRead.body.versions[0].version).toBe(3);
     });
 
     it("should deny form management to requestors and reject invalid schemas at publish time", async () => {

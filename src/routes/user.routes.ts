@@ -1,10 +1,28 @@
 import { Router, Request, Response } from "express";
-import { eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { users } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
 
 export const userRouter = Router();
+
+userRouter.get(
+  "/drivers",
+  requirePermission("read", "Vehicle"),
+  async (_req: Request, res: Response) => {
+    try {
+      const list = await db
+        .select({ id: users.id, name: users.name })
+        .from(users)
+        .where(and(eq(users.role, "driver"), eq(users.status, "active")))
+        .orderBy(asc(users.name));
+      res.json(list);
+    } catch (err: unknown) {
+      const error = err as Error;
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
 
 userRouter.use(requirePermission("manage", "all"));
 

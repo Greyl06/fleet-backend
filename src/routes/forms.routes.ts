@@ -94,7 +94,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function canReadAllSubmissions(req: Request): boolean {
+export function canReadAllSubmissions(req: Request): boolean {
   const ability = req.ability;
   return Boolean(
     ability?.can("manage", "all") ||
@@ -103,7 +103,7 @@ function canReadAllSubmissions(req: Request): boolean {
   );
 }
 
-function projectVisibleSubmissionData(
+export function projectVisibleSubmissionData(
   schema: unknown,
   workflow: unknown,
   stageId: string,
@@ -373,7 +373,7 @@ function findHiddenSubmissionFields(
   return hidden;
 }
 
-function currentSubmissionResponsibility(
+export function currentSubmissionResponsibility(
   stageId: string,
   status: string,
   workflow: unknown,
@@ -578,6 +578,7 @@ formsRouter.get(
           createdByRole: formSubmissions.createdByRole,
           departmentHeadUserId: formSubmissions.departmentHeadUserId,
           dataJson: formSubmissions.dataJson,
+          labelSnapshotsJson: formSubmissions.labelSnapshotsJson,
           schemaJson: formVersions.schemaJson,
           workflowJson: formVersions.workflowJson,
         })
@@ -638,7 +639,15 @@ formsRouter.get(
             ...responsibility,
             data: projectReportableFields(
               parseJson(row.schemaJson),
-              parseJson(row.dataJson),
+              projectVisibleSubmissionData(
+                parseJson(row.schemaJson),
+                parseJson(row.workflowJson),
+                row.stage,
+                req.user?.role ?? "",
+                parseJson(row.dataJson),
+                parseJson(row.labelSnapshotsJson),
+                !canReadAllSubmissions(req),
+              ).data,
             ),
           };
         }),
@@ -1614,6 +1623,13 @@ formsRouter.post(
         )
         .orderBy(desc(formVersions.version))
         .limit(1);
+      const { confirmRetiredKeys = [], acknowledgeFieldRetirement = false } =
+        req.body ?? {};
+      const confirmedKeysSet = new Set(
+        Array.isArray(confirmRetiredKeys) ? confirmRetiredKeys : [],
+      );
+
+      let retiredKeysList: string[] = [];
       if (publishedVersion) {
         const previousKeys = new Set(
           schemaFieldKeys(parseJson(publishedVersion.schemaJson)),
@@ -1622,20 +1638,81 @@ formsRouter.post(
         const removedKeys = [...previousKeys].filter(
           (key) => !nextKeys.has(key),
         );
-        if (removedKeys.length > 0)
+        const unconfirmedRemovedKeys = removedKeys.filter(
+          (key) => !acknowledgeFieldRetirement && !confirmedKeysSet.has(key),
+        );
+
+        if (unconfirmedRemovedKeys.length > 0) {
           return res.status(422).json({
             error: "Published field keys cannot be changed or removed",
-            details: removedKeys.map(
+            details: unconfirmedRemovedKeys.map(
               (key) => `Published field key "${key}" must be retained.`,
             ),
+            canRetire: true,
+            removedKeys: unconfirmedRemovedKeys,
           });
+        }
+        retiredKeysList = removedKeys;
       }
+      let activeWorkflow = workflow;
+      if (isRecord(workflow) && Array.isArray(workflow.stages)) {
+        const nextKeys = new Set(schemaFieldKeys(schema));
+        let workflowUpdated = false;
+        const cleanedStages = workflow.stages.map((stage) => {
+          if (!isRecord(stage) || !isRecord(stage.fieldPermissions)) return stage;
+          const cleanedPerms: Record<string, unknown> = {};
+          let permsModified = false;
+          for (const [fKey, val] of Object.entries(stage.fieldPermissions)) {
+            if (nextKeys.has(fKey)) {
+              cleanedPerms[fKey] = val;
+            } else {
+              permsModified = true;
+            }
+          }
+          if (permsModified) {
+            workflowUpdated = true;
+            return { ...stage, fieldPermissions: cleanedPerms };
+          }
+          return stage;
+        });
+
+        let cleanedTransitions = workflow.transitions;
+        if (Array.isArray(workflow.transitions)) {
+          cleanedTransitions = workflow.transitions.map((trans) => {
+            if (!isRecord(trans) || !Array.isArray(trans.requiredFields)) return trans;
+            const validReqs = trans.requiredFields.filter(
+              (f) => typeof f === "string" && nextKeys.has(f),
+            );
+            if (validReqs.length !== trans.requiredFields.length) {
+              workflowUpdated = true;
+              return { ...trans, requiredFields: validReqs };
+            }
+            return trans;
+          });
+        }
+
+        if (workflowUpdated) {
+          activeWorkflow = {
+            ...workflow,
+            stages: cleanedStages,
+            transitions: cleanedTransitions,
+          };
+          await db
+            .update(formVersions)
+            .set({
+              workflowJson: JSON.stringify(activeWorkflow),
+              updatedAt: new Date(),
+            })
+            .where(eq(formVersions.id, draft.id));
+        }
+      }
+
       const validationErrors = [
         ...validateFormSchema(
           schema,
           new Set(availableLists.map((list) => list.code)),
         ),
-        ...validateFormWorkflow(workflow, schema),
+        ...validateFormWorkflow(activeWorkflow, schema),
       ];
       if (validationErrors.length > 0)
         return res.status(422).json({
@@ -1661,10 +1738,14 @@ formsRouter.post(
         })
         .where(eq(formVersions.id, draft.id))
         .returning();
+      const retiredSuffix =
+        retiredKeysList.length > 0
+          ? ` (retired fields: ${retiredKeysList.join(", ")})`
+          : "";
       await recordFormBuilderActivity(req, {
         action: "Published",
         operation: "form_version_published",
-        description: `Published v${published.version} of form "${definition.name}" (${definition.key}).`,
+        description: `Published v${published.version} of form "${definition.name}" (${definition.key})${retiredSuffix}.`,
         formDefinitionId: definition.id,
         formKey: definition.key,
         formName: definition.name,
@@ -1674,6 +1755,7 @@ formsRouter.post(
         ...published,
         schema: parseJson(published.schemaJson),
         workflow: parseJson(published.workflowJson),
+        retiredKeys: retiredKeysList,
       });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });

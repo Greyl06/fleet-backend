@@ -6,7 +6,7 @@ import { requirePermission } from "../middleware/auth.js";
 
 export const activityLogRouter = Router();
 
-activityLogRouter.get("/", async (req: Request, res: Response) => {
+activityLogRouter.get("/", requirePermission("read", "AuditLog"), async (req: Request, res: Response) => {
   try {
     const conditions = [];
     const module = req.query.module;

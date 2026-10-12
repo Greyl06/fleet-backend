@@ -148,6 +148,7 @@ export async function authMiddleware(
           "approver",
           "department_requester",
           "driver",
+          "auditor",
         ]);
         if (!validRoles.has(role)) {
           res

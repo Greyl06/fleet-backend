@@ -32,6 +32,7 @@ export function calculateOdometerUpdate(
   });
   return {
     currentKm: endingKm,
-    status: isOverdue || vehicle.status === "pms_due" ? "pms_due" : vehicle.status,
+    status:
+      isOverdue || vehicle.status === "pms_due" ? "pms_due" : vehicle.status,
   };
 }

@@ -1,9 +1,9 @@
-import { eq } from 'drizzle-orm';
-import { db } from '../db/connection.js';
-import { vehicles } from '../db/schema.js';
-import { getPmsStatus, isPmsOverdue } from '../domain/pms.js';
-import { calculateOdometerUpdate } from '../domain/odometer.js';
-import { logger } from '../config/logger.js';
+import { eq } from "drizzle-orm";
+import { db } from "../db/connection.js";
+import { vehicles } from "../db/schema.js";
+import { getPmsStatus, isPmsOverdue } from "../domain/pms.js";
+import { calculateOdometerUpdate } from "../domain/odometer.js";
+import { logger } from "../config/logger.js";
 
 export class VehicleService {
   static async listVehicles() {
@@ -34,7 +34,13 @@ export class VehicleService {
   static async createVehicle(data: {
     plateNumber: string;
     model?: string;
-    vehicleType?: 'commuter_van' | 'truck_4w' | 'truck_6w' | 'truck_10w' | 'container_unit' | '3pl_provider';
+    vehicleType?:
+      | "commuter_van"
+      | "truck_4w"
+      | "truck_6w"
+      | "truck_10w"
+      | "container_unit"
+      | "3pl_provider";
     assignedDriver?: string;
     currentKm?: number;
     lastPmsKm?: number;
@@ -44,8 +50,8 @@ export class VehicleService {
       .insert(vehicles)
       .values({
         plateNumber: data.plateNumber.toUpperCase().trim(),
-        model: data.model || 'Standard Fleet Unit',
-        vehicleType: data.vehicleType || 'commuter_van',
+        model: data.model || "Standard Fleet Unit",
+        vehicleType: data.vehicleType || "commuter_van",
         assignedDriver: data.assignedDriver || null,
         currentKm: data.currentKm ?? 0,
         lastPmsKm: data.lastPmsKm ?? 0,
@@ -55,12 +61,15 @@ export class VehicleService {
           lastCompletedPmsKm: data.lastPmsKm ?? 0,
           intervalKm: data.pmsIntervalKm ?? 5000,
         })
-          ? 'pms_due'
-          : 'active',
+          ? "pms_due"
+          : "active",
       })
       .returning();
 
-    logger.info({ vehicleId: newVehicle.id, plateNumber: newVehicle.plateNumber }, '[VehicleService] Vehicle registered');
+    logger.info(
+      { vehicleId: newVehicle.id, plateNumber: newVehicle.plateNumber },
+      "[VehicleService] Vehicle registered",
+    );
     return newVehicle;
   }
 
@@ -88,7 +97,7 @@ export class VehicleService {
         newKm: endingKm,
         status: odometerUpdate.status,
       },
-      '[VehicleService] Vehicle odometer updated',
+      "[VehicleService] Vehicle odometer updated",
     );
 
     return updated;

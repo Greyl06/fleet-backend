@@ -137,7 +137,9 @@ export function validateFormSchema(
         } else if (
           !(
             candidate.dataSource.kind === "entity" &&
-            candidate.dataSource.entity === "vehicles"
+            ["vehicles", "drivers"].includes(
+              String(candidate.dataSource.entity),
+            )
           )
         ) {
           errors.push(`Field "${label || key}" has an invalid data source.`);

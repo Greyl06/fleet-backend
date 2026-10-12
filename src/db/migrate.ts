@@ -466,6 +466,7 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         ('finance_manager', 'Finance Manager', 'Reviews and approves finance transactions', '#10b981', TRUE),
         ('department_requester', 'Department Requester', 'Submits transportation service requests', '#f97316', TRUE),
         ('approver', 'Approver', 'Reviews and approves assigned requests', '#14b8a6', TRUE),
+        ('auditor', 'Auditor', 'Read-only submission reports and organization audit history', '#0d9488', TRUE),
         ('driver', 'Fleet Driver', 'Views assigned trip manifests and records vehicle odometers', '#64748b', TRUE)
       ON CONFLICT (key) DO NOTHING;
 

@@ -245,14 +245,22 @@ lovRouter.delete(
         .from(lovLists)
         .where(eq(lovLists.id, String(req.params.id)));
       if (!list) return res.status(404).json({ error: "LOV list not found" });
-      const CORE_SYSTEM_LISTS = new Set(["DEPARTMENTS", "VEHICLE_TYPES", "MAINTENANCE_CATEGORIES", "VENDORS"]);
+      const CORE_SYSTEM_LISTS = new Set([
+        "DEPARTMENTS",
+        "VEHICLE_TYPES",
+        "MAINTENANCE_CATEGORIES",
+        "VENDORS",
+      ]);
       if (list.isSystem || CORE_SYSTEM_LISTS.has(list.code)) {
         return res
           .status(400)
           .json({ error: "Core system reference lists cannot be deleted." });
       }
       await db.delete(lovLists).where(eq(lovLists.id, list.id));
-      res.json({ message: `List "${list.name}" deleted successfully`, id: list.id });
+      res.json({
+        message: `List "${list.name}" deleted successfully`,
+        id: list.id,
+      });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -272,9 +280,13 @@ lovRouter.post(
 
       const sourceRows: unknown = req.body?.items;
       if (!Array.isArray(sourceRows) || sourceRows.length === 0)
-        return res.status(400).json({ error: "At least one import item is required." });
+        return res
+          .status(400)
+          .json({ error: "At least one import item is required." });
       if (sourceRows.length > 1000)
-        return res.status(400).json({ error: "An import cannot exceed 1000 items." });
+        return res
+          .status(400)
+          .json({ error: "An import cannot exceed 1000 items." });
 
       const seenCodes = new Set<string>();
       const rows: Array<{
@@ -285,16 +297,25 @@ lovRouter.post(
       }> = [];
       for (const [index, source] of sourceRows.entries()) {
         if (!isRecord(source))
-          return res.status(400).json({ error: `Row ${index + 2} must be an object.` });
+          return res
+            .status(400)
+            .json({ error: `Row ${index + 2} must be an object.` });
         const code = typeof source.code === "string" ? source.code.trim() : "";
-        const label = typeof source.label === "string" ? source.label.trim() : "";
+        const label =
+          typeof source.label === "string" ? source.label.trim() : "";
         if (!code || !label)
-          return res.status(400).json({ error: `Row ${index + 2} requires code and label.` });
+          return res
+            .status(400)
+            .json({ error: `Row ${index + 2} requires code and label.` });
         if (seenCodes.has(code))
-          return res.status(400).json({ error: `Duplicate code "${code}" in import.` });
+          return res
+            .status(400)
+            .json({ error: `Duplicate code "${code}" in import.` });
         seenCodes.add(code);
         if (source.status !== "active" && source.status !== "inactive")
-          return res.status(400).json({ error: `Row ${index + 2} has an invalid status.` });
+          return res
+            .status(400)
+            .json({ error: `Row ${index + 2} has an invalid status.` });
         try {
           const attrs = await validateItemAttributes(list.id, source.attrs);
           rows.push({ code, label, status: source.status, attrs });
@@ -311,7 +332,9 @@ lovRouter.post(
           const [existing] = await transaction
             .select({ attrsJson: lovItems.attrsJson })
             .from(lovItems)
-            .where(and(eq(lovItems.listId, list.id), eq(lovItems.code, row.code)));
+            .where(
+              and(eq(lovItems.listId, list.id), eq(lovItems.code, row.code)),
+            );
           const existingAttrs = existing ? parseJson(existing.attrsJson) : {};
           const attrs = isRecord(existingAttrs)
             ? { ...existingAttrs, ...row.attrs }
@@ -539,8 +562,12 @@ lovRouter.delete(
           .delete(lovItems)
           .where(eq(lovItems.id, String(req.params.id)))
           .returning();
-        if (!deleted) return res.status(404).json({ error: "LOV item not found" });
-        return res.json({ message: "LOV item permanently deleted", id: deleted.id });
+        if (!deleted)
+          return res.status(404).json({ error: "LOV item not found" });
+        return res.json({
+          message: "LOV item permanently deleted",
+          id: deleted.id,
+        });
       }
       const [item] = await db
         .update(lovItems)

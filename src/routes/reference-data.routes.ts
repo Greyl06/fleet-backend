@@ -22,14 +22,22 @@ type CatalogValues = {
 type CatalogAdapter = {
   path: string;
   listCode: string;
-  toLegacy: (item: LovItem, attrs: Record<string, unknown>) => Record<string, unknown>;
-  fromLegacy: (body: Record<string, unknown>, existing?: LovItem) => CatalogValues;
+  toLegacy: (
+    item: LovItem,
+    attrs: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  fromLegacy: (
+    body: Record<string, unknown>,
+    existing?: LovItem,
+  ) => CatalogValues;
 };
 
 function parseAttrs(value: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(value);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : {};
   } catch {
@@ -43,7 +51,8 @@ function getString(value: unknown, fallback = ""): string {
 
 function getActiveStatus(body: Record<string, unknown>, existing?: LovItem) {
   if (body.isActive === undefined) return existing?.status ?? "active";
-  if (typeof body.isActive !== "boolean") throw new Error("isActive must be a boolean.");
+  if (typeof body.isActive !== "boolean")
+    throw new Error("isActive must be a boolean.");
   return body.isActive ? "active" : "inactive";
 }
 
@@ -179,87 +188,121 @@ async function findItem(listCode: string, id: string): Promise<LovItem | null> {
 }
 
 function validateValues(adapter: CatalogAdapter, values: CatalogValues) {
-  if (!values.code || !values.label) throw new Error("code and name are required.");
+  if (!values.code || !values.label)
+    throw new Error("code and name are required.");
   if (adapter.listCode === "VEHICLE_TYPES") {
     const category = values.attrs.category;
     const interval = values.attrs.pms_interval_km;
     if (!["light", "medium", "heavy", "special"].includes(String(category)))
       throw new Error("category must be light, medium, heavy, or special.");
-    if (typeof interval !== "number" || !Number.isFinite(interval) || interval <= 0)
+    if (
+      typeof interval !== "number" ||
+      !Number.isFinite(interval) ||
+      interval <= 0
+    )
       throw new Error("pmsIntervalKm must be a positive number.");
   }
   for (const [key, value] of Object.entries(values.attrs)) {
-    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean")
+    if (
+      typeof value !== "string" &&
+      typeof value !== "number" &&
+      typeof value !== "boolean"
+    )
       throw new Error(`Attribute "${key}" must be a scalar value.`);
   }
 }
 
 for (const adapter of catalogs) {
-  referenceDataRouter.get(`/${adapter.path}`, async (_req: Request, res: Response) => {
-    try {
-      const items = await listItems(adapter.listCode);
-      res.json(items.map((item) => adapter.toLegacy(item, parseAttrs(item.attrsJson))));
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
+  referenceDataRouter.get(
+    `/${adapter.path}`,
+    async (_req: Request, res: Response) => {
+      try {
+        const items = await listItems(adapter.listCode);
+        res.json(
+          items.map((item) =>
+            adapter.toLegacy(item, parseAttrs(item.attrsJson)),
+          ),
+        );
+      } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+      }
+    },
+  );
 
-  referenceDataRouter.post(`/${adapter.path}`, async (req: Request, res: Response) => {
-    try {
-      const listId = await getListId(adapter.listCode);
-      if (!listId) return res.status(404).json({ error: "Reference list not found." });
-      const values = adapter.fromLegacy(req.body, undefined);
-      validateValues(adapter, values);
-      const [item] = await db
-        .insert(lovItems)
-        .values({
-          listId,
-          code: values.code,
-          label: values.label,
-          status: values.status,
-          attrsJson: JSON.stringify(values.attrs),
-        })
-        .returning();
-      res.status(201).json(adapter.toLegacy(item, values.attrs));
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-    }
-  });
+  referenceDataRouter.post(
+    `/${adapter.path}`,
+    async (req: Request, res: Response) => {
+      try {
+        const listId = await getListId(adapter.listCode);
+        if (!listId)
+          return res.status(404).json({ error: "Reference list not found." });
+        const values = adapter.fromLegacy(req.body, undefined);
+        validateValues(adapter, values);
+        const [item] = await db
+          .insert(lovItems)
+          .values({
+            listId,
+            code: values.code,
+            label: values.label,
+            status: values.status,
+            attrsJson: JSON.stringify(values.attrs),
+          })
+          .returning();
+        res.status(201).json(adapter.toLegacy(item, values.attrs));
+      } catch (error) {
+        res.status(400).json({ error: (error as Error).message });
+      }
+    },
+  );
 
-  referenceDataRouter.put(`/${adapter.path}/:id`, async (req: Request, res: Response) => {
-    try {
-      const existing = await findItem(adapter.listCode, String(req.params.id));
-      if (!existing) return res.status(404).json({ error: "Reference item not found." });
-      const values = adapter.fromLegacy(req.body, existing);
-      validateValues(adapter, values);
-      const [item] = await db
-        .update(lovItems)
-        .set({
-          code: values.code,
-          label: values.label,
-          status: values.status,
-          attrsJson: JSON.stringify(values.attrs),
-          updatedAt: new Date(),
-        })
-        .where(eq(lovItems.id, existing.id))
-        .returning();
-      res.json(adapter.toLegacy(item, values.attrs));
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-    }
-  });
+  referenceDataRouter.put(
+    `/${adapter.path}/:id`,
+    async (req: Request, res: Response) => {
+      try {
+        const existing = await findItem(
+          adapter.listCode,
+          String(req.params.id),
+        );
+        if (!existing)
+          return res.status(404).json({ error: "Reference item not found." });
+        const values = adapter.fromLegacy(req.body, existing);
+        validateValues(adapter, values);
+        const [item] = await db
+          .update(lovItems)
+          .set({
+            code: values.code,
+            label: values.label,
+            status: values.status,
+            attrsJson: JSON.stringify(values.attrs),
+            updatedAt: new Date(),
+          })
+          .where(eq(lovItems.id, existing.id))
+          .returning();
+        res.json(adapter.toLegacy(item, values.attrs));
+      } catch (error) {
+        res.status(400).json({ error: (error as Error).message });
+      }
+    },
+  );
 
-  referenceDataRouter.delete(`/${adapter.path}/:id`, async (req: Request, res: Response) => {
-    try {
-      const item = await findItem(adapter.listCode, String(req.params.id));
-      if (!item) return res.status(404).json({ error: "Reference item not found." });
-      await db
-        .update(lovItems)
-        .set({ status: "inactive", updatedAt: new Date() })
-        .where(eq(lovItems.id, item.id));
-      res.json({ message: "Reference item deactivated successfully", id: item.id });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
+  referenceDataRouter.delete(
+    `/${adapter.path}/:id`,
+    async (req: Request, res: Response) => {
+      try {
+        const item = await findItem(adapter.listCode, String(req.params.id));
+        if (!item)
+          return res.status(404).json({ error: "Reference item not found." });
+        await db
+          .update(lovItems)
+          .set({ status: "inactive", updatedAt: new Date() })
+          .where(eq(lovItems.id, item.id));
+        res.json({
+          message: "Reference item deactivated successfully",
+          id: item.id,
+        });
+      } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+      }
+    },
+  );
 }
