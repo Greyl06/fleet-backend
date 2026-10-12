@@ -1722,6 +1722,87 @@ formsRouter.delete(
   },
 );
 
+formsRouter.delete(
+  "/:id",
+  requirePermission("manage", "FormDefinition"),
+  async (req: Request, res: Response) => {
+    try {
+      const identifier = String(req.params.id).trim();
+      const isUuid =
+        /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+          identifier,
+        );
+
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(
+          isUuid
+            ? or(
+                eq(formDefinitions.id, identifier),
+                eq(formDefinitions.key, identifier.toLowerCase()),
+              )
+            : eq(formDefinitions.key, identifier.toLowerCase()),
+        );
+
+      if (!definition) {
+        return res.status(404).json({ error: "Form definition not found" });
+      }
+
+      if (definition.key === "tsrf") {
+        return res.status(400).json({
+          error: "The core TSRF form template is protected and cannot be deleted.",
+        });
+      }
+
+      // Check if any version of this form definition has submissions
+      const versions = await db
+        .select({ id: formVersions.id })
+        .from(formVersions)
+        .where(eq(formVersions.formDefinitionId, definition.id));
+
+      const versionIds = versions.map((v) => v.id);
+      if (versionIds.length > 0) {
+        const [submissionCount] = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(formSubmissions)
+          .where(inArray(formSubmissions.formVersionId, versionIds));
+
+        const count = Number(submissionCount?.count || 0);
+        if (count > 0) {
+          return res.status(400).json({
+            error: `Cannot delete form "${definition.name}" because it has ${count} existing submission(s). To preserve audit history, forms with submissions cannot be deleted.`,
+          });
+        }
+      }
+
+      // Cascade delete definition (database foreign key cascades to form_versions)
+      await db
+        .delete(formDefinitions)
+        .where(eq(formDefinitions.id, definition.id));
+
+      await recordFormBuilderActivity(req, {
+        action: "Deleted",
+        operation: "form_definition_deleted",
+        description: `Deleted form definition "${definition.name}" (${definition.key}) and its ${versions.length} version(s).`,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: definition.name,
+        formVersion: 0,
+      });
+
+      res.json({
+        success: true,
+        message: `Form "${definition.name}" deleted successfully.`,
+        deletedKey: definition.key,
+        deletedId: definition.id,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
 formsRouter.post(
   "/versions/:id/publish",
   requirePermission("manage", "FormDefinition"),
