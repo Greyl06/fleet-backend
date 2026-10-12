@@ -7,6 +7,8 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function isFormBuilderMutation(method: string, path: string): boolean {
   return (
+    (method === "PUT" &&
+      /^\/api\/forms\/versions\/[^/]+\/read-access$/.test(path)) ||
     (method === "POST" && path === "/api/forms") ||
     (method === "POST" && /^\/api\/forms\/[^/]+\/versions$/.test(path)) ||
     (method === "PUT" && /^\/api\/forms\/versions\/[^/]+$/.test(path)) ||
@@ -100,12 +102,19 @@ export function activityAuditMiddleware(
           method,
           path,
           statusCode: res.statusCode,
-          ...(res.locals.roleRedirectAudit ? { roleKey: res.locals.roleRedirectAudit.roleKey, landingPage: res.locals.roleRedirectAudit.landingPage } : {}),
-          ...(/^\/api\/forms\/submissions\/([^/]+)/.test(path) ? {
-            recordType: "form_submission",
-            submissionId: path.split("/")[4],
-            recordId: path.split("/")[4],
-          } : {}),
+          ...(res.locals.roleRedirectAudit
+            ? {
+                roleKey: res.locals.roleRedirectAudit.roleKey,
+                landingPage: res.locals.roleRedirectAudit.landingPage,
+              }
+            : {}),
+          ...(/^\/api\/forms\/submissions\/([^/]+)/.test(path)
+            ? {
+                recordType: "form_submission",
+                submissionId: path.split("/")[4],
+                recordId: path.split("/")[4],
+              }
+            : {}),
         }),
       })
       .catch((error: unknown) => {

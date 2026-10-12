@@ -477,6 +477,27 @@ export const formVersions = pgTable("form_versions", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const formVersionReadAccessRevisions = pgTable(
+  "form_version_read_access_revisions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    formVersionId: uuid("form_version_id")
+      .notNull()
+      .references(() => formVersions.id),
+    revision: integer("revision").notNull(),
+    readGrantsJson: text("read_grants_json").notNull(),
+    actorId: text("actor_id").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    versionRevision: uniqueIndex("form_version_read_access_revision_idx").on(
+      table.formVersionId,
+      table.revision,
+    ),
+  }),
+);
+
 export const formSubmissions = pgTable("form_submissions", {
   id: uuid("id").defaultRandom().primaryKey(),
   submissionNumber: text("submission_number").notNull().unique(),

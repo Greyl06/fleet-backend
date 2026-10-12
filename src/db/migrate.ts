@@ -386,6 +386,17 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       );
       ALTER TABLE form_versions ADD COLUMN IF NOT EXISTS version_name TEXT;
 
+      CREATE TABLE IF NOT EXISTS form_version_read_access_revisions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        form_version_id UUID NOT NULL REFERENCES form_versions(id),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        read_grants_json TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE (form_version_id, revision)
+      );
+
       CREATE SEQUENCE IF NOT EXISTS form_submission_number_seq START WITH 1;
 
       CREATE TABLE IF NOT EXISTS form_submissions (

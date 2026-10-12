@@ -19,6 +19,7 @@ import {
   formSubmissionEvents,
   formSubmissions,
   formVersions,
+  formVersionReadAccessRevisions,
   lovItems,
   lovLists,
   users,
@@ -39,8 +40,178 @@ import {
 } from "../domain/form-definition.js";
 import { calculateOdometerUpdate } from "../domain/odometer.js";
 import { logger } from "../config/logger.js";
+import { z } from "zod";
+import {
+  createSubmissionAccessSchemas,
+  effectiveReadWorkflow,
+  validateReadGrants,
+  submissionVisibility,
+  restrictedRequesterStages,
+  type ReadPolicy,
+} from "../domain/submission-access.js";
 
 export const formsRouter = Router();
+const accessSchemas = createSubmissionAccessSchemas(z);
+
+formsRouter.use("/versions/:id/read-access", (req, res, next) => {
+  if (!z.string().uuid().safeParse(req.params.id).success)
+    return res.status(400).json({ error: "Invalid form version ID" });
+  next();
+});
+
+export async function loadReadPolicies(
+  versionIds: string[],
+  executor: Pick<typeof db, "selectDistinctOn"> = db,
+): Promise<Map<string, ReadPolicy>> {
+  if (!versionIds.length) return new Map();
+  const rows = await executor
+    .selectDistinctOn([formVersionReadAccessRevisions.formVersionId])
+    .from(formVersionReadAccessRevisions)
+    .where(
+      inArray(formVersionReadAccessRevisions.formVersionId, [
+        ...new Set(versionIds),
+      ]),
+    )
+    .orderBy(
+      formVersionReadAccessRevisions.formVersionId,
+      desc(formVersionReadAccessRevisions.revision),
+    );
+  return new Map(
+    rows.map((row) => [
+      row.formVersionId,
+      { revision: row.revision, readGrants: JSON.parse(row.readGrantsJson) },
+    ]),
+  );
+}
+
+formsRouter.get(
+  "/versions/:id/read-access",
+  requirePermission("manage", "FormDefinition"),
+  async (req, res) => {
+    const [version] = await db
+      .select()
+      .from(formVersions)
+      .where(eq(formVersions.id, String(req.params.id)));
+    if (!version)
+      return res.status(404).json({ error: "Form version not found" });
+    const policy = (await loadReadPolicies([version.id])).get(version.id);
+    const [totals] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(formSubmissions)
+      .where(eq(formSubmissions.formVersionId, version.id));
+    res.json({
+      formVersionId: version.id,
+      version: version.version,
+      status: version.status,
+      revision: policy?.revision ?? 0,
+      readGrants: policy?.readGrants ?? {},
+      affectedSubmissions: totals.total,
+    });
+  },
+);
+
+formsRouter.get(
+  "/versions/:id/read-access/history",
+  requirePermission("manage", "FormDefinition"),
+  async (req, res) => {
+    const rows = await db
+      .select()
+      .from(formVersionReadAccessRevisions)
+      .where(
+        eq(formVersionReadAccessRevisions.formVersionId, String(req.params.id)),
+      )
+      .orderBy(desc(formVersionReadAccessRevisions.revision));
+    res.json(
+      rows.map(({ readGrantsJson, ...row }) => ({
+        ...row,
+        readGrants: parseJson(readGrantsJson),
+      })),
+    );
+  },
+);
+
+formsRouter.put(
+  "/versions/:id/read-access",
+  rateLimitFormMutation,
+  requirePermission("manage", "FormDefinition"),
+  async (req, res) => {
+    const input = accessSchemas.correction.safeParse(req.body);
+    if (!input.success)
+      return res
+        .status(422)
+        .json({
+          error: "Invalid read correction",
+          details: input.error.issues.map((issue) => issue.message),
+        });
+    try {
+      const result = await db.transaction(async (transaction) => {
+        const [version] = await transaction
+          .select()
+          .from(formVersions)
+          .where(eq(formVersions.id, String(req.params.id)))
+          .for("update");
+        if (!version) return { status: 404, error: "Form version not found" };
+        if (version.status === "draft")
+          return {
+            status: 409,
+            error: "Edit draft permissions in the workflow editor.",
+          };
+        const previous = (
+          await loadReadPolicies([version.id], transaction)
+        ).get(version.id);
+        if ((previous?.revision ?? 0) !== input.data.expectedRevision)
+          return {
+            status: 409,
+            error: "Read policy changed; reload before saving.",
+          };
+        const errors = validateReadGrants(
+          parseJson(version.schemaJson),
+          parseJson(version.workflowJson),
+          input.data.readGrants,
+        );
+        if (errors.length) return { status: 422, error: errors.join(" ") };
+        const [revision] = await transaction
+          .insert(formVersionReadAccessRevisions)
+          .values({
+            formVersionId: version.id,
+            revision: (previous?.revision ?? 0) + 1,
+            readGrantsJson: JSON.stringify(input.data.readGrants),
+            actorId: req.user!.id,
+            reason: input.data.reason,
+          })
+          .returning();
+        await transaction
+          .insert(activityLogs)
+          .values({
+            userName: req.user!.name,
+            userRole: req.user!.role,
+            action: "Updated",
+            module: "Form Builder",
+            description: `Read access corrected for v${version.version}: ${input.data.reason}`,
+            severity: "success",
+            metadataJson: JSON.stringify({
+              actorId: req.user!.id,
+              operation: "form_version_read_access_corrected",
+              formDefinitionId: version.formDefinitionId,
+              formVersionId: version.id,
+              revision: revision.revision,
+              previousReadGrants: previous?.readGrants ?? {},
+              readGrants: input.data.readGrants,
+            }),
+          });
+        return {
+          status: 200,
+          revision: revision.revision,
+          readGrants: input.data.readGrants,
+        };
+      });
+      res.status(result.status).json(result);
+    } catch (error) {
+      logger.error({ error }, "Unable to correct form read access");
+      res.status(500).json({ error: "Unable to save read correction" });
+    }
+  },
+);
 
 const parseJson = (value: string) => {
   try {
@@ -348,7 +519,9 @@ function findHiddenSubmissionFields(
       if (!isRecord(field) || typeof field.key !== "string") return;
       const path = prefix ? `${prefix}.${field.key}` : field.key;
       const fieldPermissions = permissions[path];
-      const access = isRecord(fieldPermissions) ? fieldPermissions[role] : undefined;
+      const access = isRecord(fieldPermissions)
+        ? fieldPermissions[role]
+        : undefined;
       const value = values[field.key];
       if (access === "hidden" && hasValue(value)) {
         hidden.push(path);
@@ -625,6 +798,7 @@ formsRouter.get(
       const rows = await db
         .select({
           id: formSubmissions.id,
+          formVersionId: formSubmissions.formVersionId,
           submissionNumber: formSubmissions.submissionNumber,
           status: formSubmissions.status,
           stage: formSubmissions.stage,
@@ -675,6 +849,9 @@ formsRouter.get(
       const departmentHeadById = new Map(
         departmentHeads.map((user) => [user.id, user]),
       );
+      const policies = await loadReadPolicies(
+        rows.map((row) => row.formVersionId),
+      );
       res.json(
         rows.map((row) => {
           const responsibility = currentSubmissionResponsibility(
@@ -698,7 +875,10 @@ formsRouter.get(
               parseJson(row.schemaJson),
               projectVisibleSubmissionData(
                 parseJson(row.schemaJson),
-                parseJson(row.workflowJson),
+                effectiveReadWorkflow(
+                  parseJson(row.workflowJson),
+                  policies.get(row.formVersionId),
+                ),
                 row.stage,
                 req.user?.role ?? "",
                 parseJson(row.dataJson),
@@ -749,6 +929,190 @@ formsRouter.get(
   },
 );
 
+formsRouter.get(
+  "/:key/submissions",
+  requirePermission("read", "TSRFRequest"),
+  async (req, res) => {
+    const input = accessSchemas.registerQuery.safeParse(req.query);
+    if (!input.success)
+      return res.status(400).json({ error: "Invalid register filters" });
+    const [definition] = await db
+      .select()
+      .from(formDefinitions)
+      .where(eq(formDefinitions.key, String(req.params.key)));
+    if (!definition)
+      return res.status(404).json({ error: "Form definition not found" });
+    const filters = input.data;
+    if (filters.formVersionId) {
+      const [version] = await db
+        .select({ id: formVersions.id })
+        .from(formVersions)
+        .where(
+          and(
+            eq(formVersions.id, filters.formVersionId),
+            eq(formVersions.formDefinitionId, definition.id),
+          ),
+        );
+      if (!version)
+        return res.status(404).json({ error: "Form version not found" });
+    }
+    const base = and(
+      eq(formVersions.formDefinitionId, definition.id),
+      canReadAllSubmissions(req)
+        ? undefined
+        : eq(formSubmissions.createdById, req.user!.id),
+    );
+    const statusMatches: Record<string, string[]> = {
+      pending: ["in_review", "draft"],
+      returned: ["returned"],
+      approved: ["approved"],
+      dispatched: ["in_progress", "completed"],
+    };
+    const status = statusMatches[filters.status];
+    const where = and(
+      base,
+      filters.formVersionId
+        ? eq(formSubmissions.formVersionId, filters.formVersionId)
+        : undefined,
+      status
+        ? inArray(
+            formSubmissions.status,
+            status as Array<typeof formSubmissions.$inferSelect.status>,
+          )
+        : undefined,
+      filters.status === "late" || filters.sla === "late"
+        ? eq(formSubmissions.isLate, true)
+        : filters.sla === "on_time"
+          ? eq(formSubmissions.isLate, false)
+          : undefined,
+      filters.search
+        ? sql`position(lower(${filters.search}) in lower(${formSubmissions.submissionNumber})) > 0`
+        : undefined,
+    );
+    const result = await db.transaction(
+      async (transaction) => {
+        const versions = await transaction
+          .selectDistinct({
+            id: formVersions.id,
+            version: formVersions.version,
+            versionName: formVersions.versionName,
+            status: formVersions.status,
+          })
+          .from(formVersions)
+          .innerJoin(
+            formSubmissions,
+            eq(formSubmissions.formVersionId, formVersions.id),
+          )
+          .where(base)
+          .orderBy(desc(formVersions.version));
+        const [summary] = await transaction
+          .select({
+            total: sql<number>`count(*)::int`,
+            pending: sql<number>`count(*) filter (where ${formSubmissions.status} in ('draft', 'in_review'))::int`,
+            returned: sql<number>`count(*) filter (where ${formSubmissions.status} = 'returned')::int`,
+            approved: sql<number>`count(*) filter (where ${formSubmissions.status} = 'approved')::int`,
+            dispatched: sql<number>`count(*) filter (where ${formSubmissions.status} in ('in_progress', 'completed'))::int`,
+            late: sql<number>`count(*) filter (where ${formSubmissions.isLate})::int`,
+          })
+          .from(formSubmissions)
+          .innerJoin(
+            formVersions,
+            eq(formSubmissions.formVersionId, formVersions.id),
+          )
+          .where(where);
+        const records = await transaction
+          .select({ submission: formSubmissions, version: formVersions })
+          .from(formSubmissions)
+          .innerJoin(
+            formVersions,
+            eq(formSubmissions.formVersionId, formVersions.id),
+          )
+          .where(where)
+          .orderBy(desc(formSubmissions.createdAt), desc(formSubmissions.id))
+          .limit(filters.pageSize)
+          .offset((filters.page - 1) * filters.pageSize);
+        const policies = await loadReadPolicies(
+          records.map((row) => row.version.id),
+          transaction,
+        );
+        const headIds = records.flatMap((row) =>
+          row.submission.departmentHeadUserId
+            ? [row.submission.departmentHeadUserId]
+            : [],
+        );
+        const heads = headIds.length
+          ? await transaction
+              .select({ id: users.id, name: users.name, role: users.role })
+              .from(users)
+              .where(
+                and(inArray(users.id, headIds), eq(users.status, "active")),
+              )
+          : [];
+        const rows = records.map(({ submission, version }) => {
+          const schema = parseJson(version.schemaJson);
+          const workflow = parseJson(version.workflowJson);
+          const policy = policies.get(version.id);
+          const data = parseJson(submission.dataJson);
+          const projected = projectVisibleSubmissionData(
+            schema,
+            effectiveReadWorkflow(workflow, policy),
+            submission.stage,
+            req.user!.role,
+            data,
+            parseJson(submission.labelSnapshotsJson),
+            !canReadAllSubmissions(req),
+          );
+          return {
+            id: submission.id,
+            submissionNumber: submission.submissionNumber,
+            status: submission.status,
+            stage: submission.stage,
+            isLate: submission.isLate,
+            createdAt: submission.createdAt,
+            formDefinitionId: definition.id,
+            formKey: definition.key,
+            formName: schema.name ?? definition.name,
+            formVersionId: version.id,
+            version: version.version,
+            versionName: version.versionName,
+            versionStatus: version.status,
+            visibility: submissionVisibility(schema, data, projected.data),
+            readPolicyRevision: policy?.revision ?? 0,
+            data: projected.data,
+            labelSnapshots: projected.labelSnapshots,
+            ...currentSubmissionResponsibility(
+              submission.stage,
+              submission.status,
+              workflow,
+              {
+                name: submission.createdByName,
+                role: submission.createdByRole,
+              },
+              heads.find(
+                (head) => head.id === submission.departmentHeadUserId,
+              ) ?? null,
+            ),
+          };
+        });
+        return {
+          rows,
+          versions,
+          summary,
+          meta: {
+            total: summary.total,
+            page: filters.page,
+            pageSize: filters.pageSize,
+            formKey: definition.key,
+            formName: definition.name,
+          },
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    res.json(result);
+  },
+);
+
 formsRouter.post(
   "/:key/submissions",
   protectTsrfIntake,
@@ -777,6 +1141,18 @@ formsRouter.post(
         return res
           .status(404)
           .json({ error: "Published form version not found" });
+
+      if (
+        req.body?.expectedFormVersionId !== undefined &&
+        req.body.expectedFormVersionId !== version.id
+      )
+        return res
+          .status(409)
+          .json({
+            error:
+              "The form changed while you were filling it out. Reload and review before submitting.",
+            code: "FORM_VERSION_CHANGED",
+          });
 
       const schema = parseJson(version.schemaJson);
       const data = req.body?.data;
@@ -865,6 +1241,23 @@ formsRouter.post(
       const submissionNumber = `TSRF-${new Date().getFullYear()}-${String(sequenceValue).padStart(5, "0")}`;
 
       const created = await db.transaction(async (transaction) => {
+        await transaction
+          .select({ id: formDefinitions.id })
+          .from(formDefinitions)
+          .where(eq(formDefinitions.id, definition.id))
+          .for("update");
+        const [current] = await transaction
+          .select({ id: formVersions.id })
+          .from(formVersions)
+          .where(
+            and(
+              eq(formVersions.formDefinitionId, definition.id),
+              eq(formVersions.status, "published"),
+            ),
+          )
+          .orderBy(desc(formVersions.version))
+          .limit(1);
+        if (current?.id !== version.id) return null;
         const [submission] = await transaction
           .insert(formSubmissions)
           .values({
@@ -894,6 +1287,15 @@ formsRouter.post(
         });
         return submission;
       });
+
+      if (!created)
+        return res
+          .status(409)
+          .json({
+            error:
+              "The form changed while you were filling it out. Reload and review before submitting.",
+            code: "FORM_VERSION_CHANGED",
+          });
 
       const [departmentHead] = departmentHeadUserId
         ? await db
@@ -1309,11 +1711,17 @@ formsRouter.get(
         return res
           .status(409)
           .json({ error: "Pinned form version is unavailable" });
-      const formSchema = parseJson(version.schemaJson);
+      const formSchema = {
+        ...parseJson(version.schemaJson),
+        version: version.version,
+        status: version.status,
+        versionName: version.versionName ?? null,
+      };
       const strictFieldAccess = !canReadAllSubmissions(req);
+      const policy = (await loadReadPolicies([version.id])).get(version.id);
       const projected = projectVisibleSubmissionData(
         formSchema,
-        parseJson(version.workflowJson),
+        effectiveReadWorkflow(parseJson(version.workflowJson), policy),
         submission.stage,
         req.user?.role ?? "",
         parseJson(submission.dataJson),
@@ -1373,14 +1781,75 @@ formsRouter.get(
           : null,
       );
       const { dataJson, labelSnapshotsJson, ...submissionFields } = submission;
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, version.formDefinitionId));
+      if (req.query.formKey && req.query.formKey !== definition.key)
+        return res.status(404).json({ error: "Form submission not found" });
+      const availableTransitions = transitions.flatMap((transition) => {
+        if (transition.from !== submission.stage) return [];
+        const roles = Array.isArray(transition.roles)
+          ? transition.roles
+          : typeof transition.role === "string"
+            ? [transition.role]
+            : [];
+        if (!req.user || !roles.includes(req.user.role)) return [];
+        const target = stages.find((stage) => stage.id === transition.to);
+        if (
+          !target ||
+          typeof target.id !== "string" ||
+          typeof target.statusCategory !== "string" ||
+          !STATUS_CATEGORIES.has(target.statusCategory)
+        )
+          return [];
+        if (strictFieldAccess) {
+          const ownerCancellation =
+            submission.createdById === req.user.id &&
+            req.user.role === "department_requester" &&
+            target.statusCategory === "cancelled";
+          if (target.id !== resubmitStage && !ownerCancellation) return [];
+        }
+        if (
+          submission.stage === "submitted" &&
+          req.user.role === "approver" &&
+          submission.departmentHeadUserId !== req.user.id
+        )
+          return [];
+        return [
+          {
+            toStage: target.id,
+            label: typeof target.label === "string" ? target.label : target.id,
+            statusCategory: target.statusCategory,
+            reasonRequired:
+              transition.reasonRequired === true ||
+              ["rejected", "cancelled", "returned"].includes(
+                target.statusCategory,
+              ),
+          },
+        ];
+      });
       res.json({
         ...submissionFields,
         ...responsibility,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: formSchema.name ?? definition.name,
+        version: version.version,
+        versionName: version.versionName,
+        versionStatus: version.status,
+        readPolicyRevision: policy?.revision ?? 0,
+        visibility: submissionVisibility(
+          formSchema,
+          parseJson(dataJson),
+          projected.data,
+        ),
         formSchema: projected.schema,
         data: projected.data,
         labelSnapshots: projected.labelSnapshots,
         fieldAccess: projected.fieldAccess,
         resubmitStage,
+        availableTransitions,
       });
     } catch {
       res.status(500).json({ error: "Unable to load form submission" });
@@ -1437,14 +1906,16 @@ formsRouter.post(
       if (existing) {
         return res
           .status(409)
-          .json({ error: `A form with key "${normalizedKey}" already exists.` });
+          .json({
+            error: `A form with key "${normalizedKey}" already exists.`,
+          });
       }
       const resolvedVersionName =
         typeof versionName === "string" && versionName.trim()
           ? versionName.trim()
           : typeof schema?.versionName === "string" && schema.versionName.trim()
-          ? schema.versionName.trim()
-          : null;
+            ? schema.versionName.trim()
+            : null;
       const nextSchema = {
         ...schema,
         key: normalizedKey,
@@ -1477,7 +1948,15 @@ formsRouter.post(
       });
       res
         .status(201)
-        .json({ ...definition, version: { ...version, versionName: resolvedVersionName, schema: nextSchema, workflow } });
+        .json({
+          ...definition,
+          version: {
+            ...version,
+            versionName: resolvedVersionName,
+            schema: nextSchema,
+            workflow,
+          },
+        });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -1526,14 +2005,14 @@ formsRouter.post(
         typeof versionName === "string" && versionName.trim()
           ? versionName.trim()
           : typeof schema?.versionName === "string" && schema.versionName.trim()
-          ? schema.versionName.trim()
-          : null;
+            ? schema.versionName.trim()
+            : null;
       const resolvedFormName =
         typeof name === "string" && name.trim()
           ? name.trim()
           : typeof schema?.name === "string" && schema.name.trim()
-          ? schema.name.trim()
-          : targetDefinition.name;
+            ? schema.name.trim()
+            : targetDefinition.name;
       const nextSchema = {
         ...schema,
         name: resolvedFormName,
@@ -1565,7 +2044,14 @@ formsRouter.post(
         formName: resolvedFormName,
         formVersion: version.version,
       });
-      res.status(201).json({ ...version, versionName: resolvedVersionName, schema: nextSchema, workflow });
+      res
+        .status(201)
+        .json({
+          ...version,
+          versionName: resolvedVersionName,
+          schema: nextSchema,
+          workflow,
+        });
     } catch (error) {
       const message =
         (error as any)?.cause?.message || (error as Error).message;
@@ -1602,15 +2088,15 @@ formsRouter.put(
         typeof versionName === "string" && versionName.trim()
           ? versionName.trim()
           : typeof schema?.versionName === "string" && schema.versionName.trim()
-          ? schema.versionName.trim()
-          : draft.versionName;
+            ? schema.versionName.trim()
+            : draft.versionName;
 
       const resolvedFormName =
         typeof name === "string" && name.trim()
           ? name.trim()
           : typeof schema?.name === "string" && schema.name.trim()
-          ? schema.name.trim()
-          : definition.name;
+            ? schema.name.trim()
+            : definition.name;
 
       const nextSchema = {
         ...schema,
@@ -1662,7 +2148,12 @@ formsRouter.put(
           changedAreas: changedAreas.join(","),
         });
       }
-      res.json({ ...version, versionName: resolvedVersionName, schema: nextSchema, workflow: nextWorkflow });
+      res.json({
+        ...version,
+        versionName: resolvedVersionName,
+        schema: nextSchema,
+        workflow: nextWorkflow,
+      });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -1827,7 +2318,9 @@ formsRouter.delete(
         .from(formDefinitions)
         .where(eq(formDefinitions.id, targetVersion.formDefinitionId));
 
-      await db.delete(formVersions).where(eq(formVersions.id, targetVersion.id));
+      await db
+        .delete(formVersions)
+        .where(eq(formVersions.id, targetVersion.id));
 
       if (definition) {
         await recordFormBuilderActivity(req, {
@@ -1882,7 +2375,8 @@ formsRouter.delete(
 
       if (definition.key === "tsrf") {
         return res.status(400).json({
-          error: "The core TSRF form template is protected and cannot be deleted.",
+          error:
+            "The core TSRF form template is protected and cannot be deleted.",
         });
       }
 
@@ -2009,7 +2503,8 @@ formsRouter.post(
         const nextKeys = new Set(schemaFieldKeys(schema));
         let workflowUpdated = false;
         const cleanedStages = workflow.stages.map((stage) => {
-          if (!isRecord(stage) || !isRecord(stage.fieldPermissions)) return stage;
+          if (!isRecord(stage) || !isRecord(stage.fieldPermissions))
+            return stage;
           const cleanedPerms: Record<string, unknown> = {};
           let permsModified = false;
           for (const [fKey, val] of Object.entries(stage.fieldPermissions)) {
@@ -2029,7 +2524,8 @@ formsRouter.post(
         let cleanedTransitions = workflow.transitions;
         if (Array.isArray(workflow.transitions)) {
           cleanedTransitions = workflow.transitions.map((trans) => {
-            if (!isRecord(trans) || !Array.isArray(trans.requiredFields)) return trans;
+            if (!isRecord(trans) || !Array.isArray(trans.requiredFields))
+              return trans;
             const validReqs = trans.requiredFields.filter(
               (f) => typeof f === "string" && nextKeys.has(f),
             );
@@ -2069,6 +2565,22 @@ formsRouter.post(
           error: "Form schema validation failed",
           details: validationErrors,
         });
+      const restrictedStages = restrictedRequesterStages(
+        schema,
+        activeWorkflow,
+      );
+      const acknowledged = Array.isArray(req.body?.acknowledgeRestrictedStages)
+        ? req.body.acknowledgeRestrictedStages
+        : [];
+      if (restrictedStages.some((stage) => !acknowledged.includes(stage)))
+        return res
+          .status(422)
+          .json({
+            error:
+              "Requestor read access is incomplete. Configure stage permissions or acknowledge the restricted stages.",
+            code: "RESTRICTED_STAGE_ACCESS",
+            restrictedStages,
+          });
       const publishedFormName =
         typeof schema.name === "string" && schema.name.trim()
           ? schema.name.trim()
@@ -2079,25 +2591,62 @@ formsRouter.post(
           .set({ name: publishedFormName, updatedAt: new Date() })
           .where(eq(formDefinitions.id, definition.id));
       }
-      await db
-        .update(formVersions)
-        .set({ status: "archived", updatedAt: new Date() })
-        .where(
-          and(
-            eq(formVersions.formDefinitionId, draft.formDefinitionId),
-            eq(formVersions.status, "published"),
-          ),
-        );
-      const [published] = await db
-        .update(formVersions)
-        .set({
-          status: "published",
-          publishedBy: req.user?.name ?? "system",
-          publishedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(formVersions.id, draft.id))
-        .returning();
+      const published = await db.transaction(async (transaction) => {
+        await transaction
+          .select({ id: formDefinitions.id })
+          .from(formDefinitions)
+          .where(eq(formDefinitions.id, draft.formDefinitionId))
+          .for("update");
+        const [currentPublished] = await transaction
+          .select({ schemaJson: formVersions.schemaJson })
+          .from(formVersions)
+          .where(
+            and(
+              eq(formVersions.formDefinitionId, draft.formDefinitionId),
+              eq(formVersions.status, "published"),
+            ),
+          )
+          .orderBy(desc(formVersions.version))
+          .limit(1);
+        if (currentPublished?.schemaJson !== publishedVersion?.schemaJson)
+          return null;
+        const [currentDraft] = await transaction
+          .select()
+          .from(formVersions)
+          .where(eq(formVersions.id, draft.id))
+          .for("update");
+        if (
+          currentDraft.status !== "draft" ||
+          currentDraft.schemaJson !== draft.schemaJson ||
+          JSON.stringify(parseJson(currentDraft.workflowJson)) !==
+            JSON.stringify(activeWorkflow)
+        )
+          return null;
+        await transaction
+          .update(formVersions)
+          .set({ status: "archived", updatedAt: new Date() })
+          .where(
+            and(
+              eq(formVersions.formDefinitionId, draft.formDefinitionId),
+              eq(formVersions.status, "published"),
+            ),
+          );
+        const [next] = await transaction
+          .update(formVersions)
+          .set({
+            status: "published",
+            publishedBy: req.user?.name ?? "system",
+            publishedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(formVersions.id, draft.id))
+          .returning();
+        return next;
+      });
+      if (!published)
+        return res
+          .status(409)
+          .json({ error: "Draft changed; reload before publishing." });
       const retiredSuffix =
         retiredKeysList.length > 0
           ? ` (retired fields: ${retiredKeysList.join(", ")})`
@@ -2105,7 +2654,7 @@ formsRouter.post(
       await recordFormBuilderActivity(req, {
         action: "Published",
         operation: "form_version_published",
-        description: `Published v${published.version} of form "${publishedFormName}" (${definition.key})${retiredSuffix}.`,
+        description: `Published v${published.version} of form "${publishedFormName}" (${definition.key})${retiredSuffix}. Restricted stages acknowledged: ${restrictedStages.join(", ") || "none"}.`,
         formDefinitionId: definition.id,
         formKey: definition.key,
         formName: publishedFormName,

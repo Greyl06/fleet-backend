@@ -30,6 +30,7 @@ import {
   canReadAllSubmissions,
   currentSubmissionResponsibility,
   projectVisibleSubmissionData,
+  loadReadPolicies,
 } from "./forms.routes.js";
 import { projectReportableFields } from "../domain/form-definition.js";
 import {
@@ -38,6 +39,7 @@ import {
   reportQuerySchema,
 } from "../domain/reporting.js";
 import { rateLimitFormMutation } from "../middleware/arcjet.js";
+import { effectiveReadWorkflow } from "../domain/submission-access.js";
 import { logger } from "../config/logger.js";
 
 export const reportsRouter = Router();
@@ -239,12 +241,16 @@ async function queryReport(
             .from(users)
             .where(and(inArray(users.id, headIds), eq(users.status, "active")))
         : [];
+      const readPolicies = await loadReadPolicies(
+        selected.map((row) => row.version.id),
+        transaction,
+      );
       const rows = selected.map(({ submission, version, definition }) => {
         const schema = parseJson(version.schemaJson);
         const workflow = parseJson(version.workflowJson);
         const visible = projectVisibleSubmissionData(
           schema,
-          workflow,
+          effectiveReadWorkflow(workflow, readPolicies.get(version.id)),
           submission.stage,
           req.user!.role,
           parseJson(submission.dataJson),
@@ -268,11 +274,13 @@ async function queryReport(
             ? schema.name.trim()
             : definition.name;
         const resolvedVersionName =
-          typeof (version as any).versionName === "string" && (version as any).versionName.trim()
+          typeof (version as any).versionName === "string" &&
+          (version as any).versionName.trim()
             ? (version as any).versionName.trim()
-            : typeof schema.versionName === "string" && schema.versionName.trim()
-            ? schema.versionName.trim()
-            : `v${version.version}`;
+            : typeof schema.versionName === "string" &&
+                schema.versionName.trim()
+              ? schema.versionName.trim()
+              : `v${version.version}`;
 
         return {
           id: submission.id,
@@ -324,12 +332,10 @@ for (const kind of ["submissions", "activity"] as const) {
   reportsRouter.get(`/${kind}`, permission, async (req, res) => {
     const validation = reportQuerySchema.safeParse(req.query);
     if (!validation.success) {
-      res
-        .status(400)
-        .json({
-          error: "Invalid report filters",
-          details: validation.error.flatten(),
-        });
+      res.status(400).json({
+        error: "Invalid report filters",
+        details: validation.error.flatten(),
+      });
       return;
     }
     try {
@@ -350,12 +356,10 @@ for (const kind of ["submissions", "activity"] as const) {
       try {
         const report = await queryReport(req, kind, true);
         if ("tooLarge" in report) {
-          res
-            .status(422)
-            .json({
-              error:
-                "Export exceeds 10,000 records. Narrow the date range or filters.",
-            });
+          res.status(422).json({
+            error:
+              "Export exceeds 10,000 records. Narrow the date range or filters.",
+          });
           return;
         }
         const rows: Record<string, unknown>[] = report.rows.map((row) => {
@@ -427,24 +431,22 @@ for (const kind of ["submissions", "activity"] as const) {
                 "submissionId",
               ];
         const csv = reportCsv(rows, columns);
-        await db
-          .insert(activityLogs)
-          .values({
-            userName: req.user!.name,
-            userRole: req.user!.role,
-            action: "Exported",
-            module: "Reports",
-            description: `Exported ${kind} report (${rows.length} records).`,
-            severity: "info",
-            metadataJson: JSON.stringify({
-              actorId: req.user!.id,
-              recordType: kind,
-              filters: report.meta.filters,
-              scope: report.meta.scope,
-              rowCount: rows.length,
-              generatedAt: report.meta.generatedAt,
-            }),
-          });
+        await db.insert(activityLogs).values({
+          userName: req.user!.name,
+          userRole: req.user!.role,
+          action: "Exported",
+          module: "Reports",
+          description: `Exported ${kind} report (${rows.length} records).`,
+          severity: "info",
+          metadataJson: JSON.stringify({
+            actorId: req.user!.id,
+            recordType: kind,
+            filters: report.meta.filters,
+            scope: report.meta.scope,
+            rowCount: rows.length,
+            generatedAt: report.meta.generatedAt,
+          }),
+        });
         res.setHeader("Content-Type", "text/csv; charset=utf-8");
         res.setHeader("Cache-Control", "no-store");
         res.setHeader(

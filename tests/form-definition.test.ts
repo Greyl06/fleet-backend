@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  effectiveReadWorkflow,
+  validateReadGrants,
+  submissionVisibility,
+  restrictedRequesterStages,
+} from "../src/domain/submission-access.js";
+import {
   validateFormSchema,
   validateFormSubmission,
   evaluateFormCutoff,
@@ -35,6 +41,44 @@ const validSchema = {
 };
 
 describe("validateFormSchema", () => {
+  it("adds only version-specific read grants and distinguishes restricted data", () => {
+    const workflow = {
+      stages: [
+        { id: "submitted", fieldPermissions: {} },
+        {
+          id: "returned",
+          fieldPermissions: { project: { department_requester: "edit" } },
+        },
+      ],
+    };
+    const policy = {
+      revision: 1,
+      readGrants: { submitted: { department_requester: ["project"] } },
+    };
+    expect(
+      validateReadGrants(validSchema, workflow, policy.readGrants),
+    ).toEqual([]);
+    expect(
+      validateReadGrants(validSchema, workflow, {
+        missing: { department_requester: ["secret"] },
+      }),
+    ).not.toEqual([]);
+    expect(effectiveReadWorkflow(workflow, policy)).toMatchObject({
+      stages: [
+        { fieldPermissions: { project: { department_requester: "read" } } },
+        { fieldPermissions: { project: { department_requester: "edit" } } },
+      ],
+    });
+    expect(workflow.stages[0].fieldPermissions).toEqual({});
+    expect(submissionVisibility(validSchema, { project: "Stored" }, {})).toBe(
+      "restricted",
+    );
+    expect(submissionVisibility(validSchema, {}, {})).toBe("empty");
+    expect(restrictedRequesterStages(validSchema, workflow)).toEqual([
+      "submitted",
+      "returned",
+    ]);
+  });
   it("accepts structurally valid schemas with existing LOV sources", () => {
     expect(validateFormSchema(validSchema, new Set(["DEPARTMENTS"]))).toEqual(
       [],
@@ -283,8 +327,16 @@ describe("projectReportableFields", () => {
               type: "repeater",
               meta: { reportable: true, pii: false },
               rowFields: [
-                { key: "name", type: "text", meta: { reportable: true, pii: true } },
-                { key: "role", type: "text", meta: { reportable: true, pii: false } },
+                {
+                  key: "name",
+                  type: "text",
+                  meta: { reportable: true, pii: true },
+                },
+                {
+                  key: "role",
+                  type: "text",
+                  meta: { reportable: true, pii: false },
+                },
               ],
             },
           ],
