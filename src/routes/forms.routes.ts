@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import {
   and,
+  asc,
   desc,
   eq,
   gte,
@@ -511,6 +512,58 @@ function schemaFieldKeys(schema: unknown, prefix = ""): string[] {
       : [],
   );
 }
+
+formsRouter.get(
+  "/",
+  requirePermission("read", "FormDefinition"),
+  async (_req: Request, res: Response) => {
+    try {
+      const allDefinitions = await db
+        .select()
+        .from(formDefinitions)
+        .orderBy(asc(formDefinitions.name));
+
+      const allVersions = await db
+        .select({
+          id: formVersions.id,
+          formDefinitionId: formVersions.formDefinitionId,
+          version: formVersions.version,
+          versionName: formVersions.versionName,
+          status: formVersions.status,
+          updatedAt: formVersions.updatedAt,
+        })
+        .from(formVersions)
+        .orderBy(desc(formVersions.version));
+
+      const formsWithVersions = allDefinitions.map((def) => {
+        const defVersions = allVersions.filter(
+          (v) => v.formDefinitionId === def.id,
+        );
+        const publishedVersion = defVersions.find(
+          (v) => v.status === "published",
+        );
+        const latestDraft = defVersions.find((v) => v.status === "draft");
+        const latestVersion = defVersions[0];
+        return {
+          id: def.id,
+          key: def.key,
+          name: def.name,
+          createdAt: def.createdAt,
+          updatedAt: def.updatedAt,
+          versionCount: defVersions.length,
+          publishedVersion: publishedVersion ? publishedVersion.version : null,
+          publishedVersionName: publishedVersion?.versionName ?? null,
+          hasDraft: Boolean(latestDraft),
+          latestVersion: latestVersion ? latestVersion.version : 1,
+        };
+      });
+
+      res.json(formsWithVersions);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  },
+);
 
 formsRouter.get("/published/:key", async (req: Request, res: Response) => {
   try {
@@ -1376,6 +1429,16 @@ formsRouter.post(
         return res
           .status(400)
           .json({ error: "key, name, and schema are required" });
+      const normalizedKey = String(key).trim().toLowerCase();
+      const [existing] = await db
+        .select({ id: formDefinitions.id })
+        .from(formDefinitions)
+        .where(eq(formDefinitions.key, normalizedKey));
+      if (existing) {
+        return res
+          .status(409)
+          .json({ error: `A form with key "${normalizedKey}" already exists.` });
+      }
       const resolvedVersionName =
         typeof versionName === "string" && versionName.trim()
           ? versionName.trim()
@@ -1384,12 +1447,13 @@ formsRouter.post(
           : null;
       const nextSchema = {
         ...schema,
+        key: normalizedKey,
         name,
         ...(resolvedVersionName ? { versionName: resolvedVersionName } : {}),
       };
       const [definition] = await db
         .insert(formDefinitions)
-        .values({ key, name })
+        .values({ key: normalizedKey, name })
         .returning();
       const [version] = await db
         .insert(formVersions)
