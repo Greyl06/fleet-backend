@@ -214,6 +214,13 @@ export const permissions = pgTable("permissions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const roleLoginRedirects = pgTable("role_login_redirects", {
+  roleKey: text("role_key").primaryKey(),
+  landingPage: text("landing_page").notNull(),
+  updatedById: text("updated_by_id").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const rolePermissions = pgTable("role_permissions", {
   id: uuid("id").defaultRandom().primaryKey(),
   roleId: uuid("role_id")
@@ -458,6 +465,7 @@ export const formVersions = pgTable("form_versions", {
     .notNull()
     .references(() => formDefinitions.id, { onDelete: "cascade" }),
   version: integer("version").notNull(),
+  versionName: text("version_name"),
   schemaJson: text("schema_json").notNull(),
   workflowJson: text("workflow_json").notNull().default("{}"),
   status: text("status", { enum: ["draft", "published", "archived"] })

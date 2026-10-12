@@ -1,9 +1,45 @@
 import { Router, Request, Response } from "express";
 import { db } from "../db/connection.js";
-import { roles, permissions, rolePermissions } from "../db/schema.js";
+import { roles, permissions, rolePermissions, roleLoginRedirects } from "../db/schema.js";
+import { mapInternalRole, type Role } from "../auth/abilities.js";
+import { defaultLandingPages, effectiveLandingPage, permittedLandingPages, roleRedirectInput } from "../domain/role-navigation.js";
+import { resolveLandingPage } from "../services/role-navigation.service.js";
 import { requirePermission } from "../middleware/auth.js";
 
 export const rolesRouter = Router();
+
+rolesRouter.get("/login-redirects/me", async (req, res) => {
+  if (!req.user) { res.status(401).json({ error: "Authentication required." }); return; }
+  try { res.setHeader("Cache-Control", "no-store"); res.json({ landingPage: await resolveLandingPage(req.user.role) }); }
+  catch { res.status(503).json({ error: "Unable to resolve role landing page." }); }
+});
+
+rolesRouter.get("/login-redirects", requirePermission("manage", "all"), async (_req, res) => {
+  try {
+    const saved = await db.select().from(roleLoginRedirects);
+    res.setHeader("Cache-Control", "no-store");
+    res.json((Object.keys(defaultLandingPages) as Role[]).map((role) => ({
+      role, label: role === "admin" ? "System Administrator" : role.replace(/_/g, " "),
+      landingPage: effectiveLandingPage(role, saved.find((row) => row.roleKey === role)?.landingPage), options: permittedLandingPages(role),
+    })));
+  } catch { res.status(500).json({ error: "Unable to load role landing pages." }); }
+});
+
+rolesRouter.patch("/login-redirects/:role", requirePermission("manage", "all"), async (req, res) => {
+  const role = mapInternalRole(String(req.params.role));
+  if (!role) { res.status(404).json({ error: "Unsupported role." }); return; }
+  const parsed = roleRedirectInput.safeParse(req.body);
+  if (!parsed.success || !permittedLandingPages(role).some((page) => page.path === parsed.data.landingPage)) {
+    res.status(400).json({ error: "Select an existing page permitted for this role." }); return;
+  }
+  try {
+    await db.insert(roleLoginRedirects).values({ roleKey: role, landingPage: parsed.data.landingPage, updatedById: req.user!.id }).onConflictDoUpdate({
+      target: roleLoginRedirects.roleKey, set: { landingPage: parsed.data.landingPage, updatedById: req.user!.id, updatedAt: new Date() },
+    });
+    res.locals.roleRedirectAudit = { roleKey: role, landingPage: parsed.data.landingPage };
+    res.json({ landingPage: parsed.data.landingPage });
+  } catch { res.status(500).json({ error: "Unable to save role landing page." }); }
+});
 
 function rejectUnwiredRolePolicyWrites(_req: Request, res: Response): void {
   res.status(409).json({

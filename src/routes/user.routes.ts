@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
-import { users } from "../db/schema.js";
+import { users, localCredentials } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
 
 export const userRouter = Router();
@@ -30,7 +30,9 @@ userRouter.use(requirePermission("manage", "all"));
 userRouter.get("/", async (_req: Request, res: Response) => {
   try {
     const list = await db.select().from(users);
-    res.json(list);
+    const credentials = await db.select({ userId: localCredentials.userId }).from(localCredentials);
+    const localUsers = new Set(credentials.map((credential) => credential.userId));
+    res.json(list.map((user) => ({ ...user, hasLocalPassword: localUsers.has(user.id) })));
   } catch (err: unknown) {
     const error = err as Error;
     res.status(500).json({ error: error.message });

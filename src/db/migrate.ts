@@ -162,6 +162,13 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS role_login_redirects (
+        role_key TEXT PRIMARY KEY,
+        landing_page TEXT NOT NULL,
+        updated_by_id TEXT NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
       CREATE TABLE IF NOT EXISTS role_permissions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
@@ -370,12 +377,14 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         schema_json TEXT NOT NULL,
         workflow_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'draft',
+        version_name TEXT,
         published_by TEXT,
         published_at TIMESTAMP,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
         UNIQUE (form_definition_id, version)
       );
+      ALTER TABLE form_versions ADD COLUMN IF NOT EXISTS version_name TEXT;
 
       CREATE SEQUENCE IF NOT EXISTS form_submission_number_seq START WITH 1;
 

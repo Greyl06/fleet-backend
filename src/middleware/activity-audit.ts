@@ -100,6 +100,7 @@ export function activityAuditMiddleware(
           method,
           path,
           statusCode: res.statusCode,
+          ...(res.locals.roleRedirectAudit ? { roleKey: res.locals.roleRedirectAudit.roleKey, landingPage: res.locals.roleRedirectAudit.landingPage } : {}),
           ...(/^\/api\/forms\/submissions\/([^/]+)/.test(path) ? {
             recordType: "form_submission",
             submissionId: path.split("/")[4],

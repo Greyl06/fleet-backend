@@ -67,6 +67,7 @@ export function createReportSchemas(zod: typeof import("zod").z) {
     formKey: z.string(),
     formName: z.string(),
     version: z.number(),
+    versionName: z.string().optional(),
     status: z.string(),
     stage: z.string(),
     isLate: z.boolean(),

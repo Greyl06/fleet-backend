@@ -539,11 +539,15 @@ formsRouter.get("/published/:key", async (req: Request, res: Response) => {
         .json({ error: "Published form definition not found" });
     res.json({
       ...definition,
-      versions: versions.map((version) => ({
-        ...version,
-        schema: parseJson(version.schemaJson),
-        workflow: parseJson(version.workflowJson),
-      })),
+      versions: versions.map((version) => {
+        const schema = parseJson(version.schemaJson);
+        return {
+          ...version,
+          versionName: version.versionName ?? schema.versionName ?? null,
+          schema,
+          workflow: parseJson(version.workflowJson),
+        };
+      }),
     });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
@@ -676,11 +680,15 @@ formsRouter.get(
         .orderBy(desc(formVersions.version));
       res.json({
         ...definition,
-        versions: versions.map((version) => ({
-          ...version,
-          schema: parseJson(version.schemaJson),
-          workflow: parseJson(version.workflowJson),
-        })),
+        versions: versions.map((version) => {
+          const schema = parseJson(version.schemaJson);
+          return {
+            ...version,
+            versionName: version.versionName ?? schema.versionName ?? null,
+            schema,
+            workflow: parseJson(version.workflowJson),
+          };
+        }),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -1363,11 +1371,22 @@ formsRouter.post(
   requirePermission("manage", "FormDefinition"),
   async (req: Request, res: Response) => {
     try {
-      const { key, name, schema, workflow = {} } = req.body;
+      const { key, name, versionName, schema, workflow = {} } = req.body;
       if (!key || !name || !schema)
         return res
           .status(400)
           .json({ error: "key, name, and schema are required" });
+      const resolvedVersionName =
+        typeof versionName === "string" && versionName.trim()
+          ? versionName.trim()
+          : typeof schema?.versionName === "string" && schema.versionName.trim()
+          ? schema.versionName.trim()
+          : null;
+      const nextSchema = {
+        ...schema,
+        name,
+        ...(resolvedVersionName ? { versionName: resolvedVersionName } : {}),
+      };
       const [definition] = await db
         .insert(formDefinitions)
         .values({ key, name })
@@ -1377,7 +1396,8 @@ formsRouter.post(
         .values({
           formDefinitionId: definition.id,
           version: 1,
-          schemaJson: JSON.stringify(schema),
+          versionName: resolvedVersionName,
+          schemaJson: JSON.stringify(nextSchema),
           workflowJson: JSON.stringify(workflow),
           status: "draft",
         })
@@ -1393,7 +1413,7 @@ formsRouter.post(
       });
       res
         .status(201)
-        .json({ ...definition, version: { ...version, schema, workflow } });
+        .json({ ...definition, version: { ...version, versionName: resolvedVersionName, schema: nextSchema, workflow } });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -1435,15 +1455,39 @@ formsRouter.post(
         .select({ version: max(formVersions.version) })
         .from(formVersions)
         .where(eq(formVersions.formDefinitionId, targetDefinitionId));
-      const { schema, workflow = {} } = req.body;
+      const { schema, workflow = {}, name, versionName } = req.body;
       if (!schema) return res.status(400).json({ error: "schema is required" });
       const nextVersion = Number(latest.version ?? 0) + 1;
+      const resolvedVersionName =
+        typeof versionName === "string" && versionName.trim()
+          ? versionName.trim()
+          : typeof schema?.versionName === "string" && schema.versionName.trim()
+          ? schema.versionName.trim()
+          : null;
+      const resolvedFormName =
+        typeof name === "string" && name.trim()
+          ? name.trim()
+          : typeof schema?.name === "string" && schema.name.trim()
+          ? schema.name.trim()
+          : targetDefinition.name;
+      const nextSchema = {
+        ...schema,
+        name: resolvedFormName,
+        ...(resolvedVersionName ? { versionName: resolvedVersionName } : {}),
+      };
+      if (resolvedFormName !== targetDefinition.name) {
+        await db
+          .update(formDefinitions)
+          .set({ name: resolvedFormName, updatedAt: new Date() })
+          .where(eq(formDefinitions.id, targetDefinition.id));
+      }
       const [version] = await db
         .insert(formVersions)
         .values({
           formDefinitionId: targetDefinitionId,
           version: nextVersion,
-          schemaJson: JSON.stringify(schema),
+          versionName: resolvedVersionName,
+          schemaJson: JSON.stringify(nextSchema),
           workflowJson: JSON.stringify(workflow),
           status: "draft",
         })
@@ -1451,13 +1495,13 @@ formsRouter.post(
       await recordFormBuilderActivity(req, {
         action: "Created",
         operation: "form_draft_created",
-        description: `Created draft v${version.version} of form "${targetDefinition.name}" (${targetDefinition.key}).`,
+        description: `Created draft v${version.version} of form "${resolvedFormName}" (${targetDefinition.key}).`,
         formDefinitionId: targetDefinition.id,
         formKey: targetDefinition.key,
-        formName: targetDefinition.name,
+        formName: resolvedFormName,
         formVersion: version.version,
       });
-      res.status(201).json({ ...version, schema, workflow });
+      res.status(201).json({ ...version, versionName: resolvedVersionName, schema: nextSchema, workflow });
     } catch (error) {
       const message =
         (error as any)?.cause?.message || (error as Error).message;
@@ -1471,7 +1515,7 @@ formsRouter.put(
   requirePermission("manage", "FormDefinition"),
   async (req: Request, res: Response) => {
     try {
-      const { schema, workflow } = req.body;
+      const { schema, workflow, name, versionName } = req.body;
       const [draft] = await db
         .select()
         .from(formVersions)
@@ -1489,17 +1533,47 @@ formsRouter.put(
         .where(eq(formDefinitions.id, draft.formDefinitionId));
       if (!definition)
         return res.status(404).json({ error: "Form definition not found" });
+
+      const resolvedVersionName =
+        typeof versionName === "string" && versionName.trim()
+          ? versionName.trim()
+          : typeof schema?.versionName === "string" && schema.versionName.trim()
+          ? schema.versionName.trim()
+          : draft.versionName;
+
+      const resolvedFormName =
+        typeof name === "string" && name.trim()
+          ? name.trim()
+          : typeof schema?.name === "string" && schema.name.trim()
+          ? schema.name.trim()
+          : definition.name;
+
+      const nextSchema = {
+        ...schema,
+        name: resolvedFormName,
+        ...(resolvedVersionName ? { versionName: resolvedVersionName } : {}),
+      };
+
+      if (resolvedFormName !== definition.name) {
+        await db
+          .update(formDefinitions)
+          .set({ name: resolvedFormName, updatedAt: new Date() })
+          .where(eq(formDefinitions.id, definition.id));
+      }
+
       const nextWorkflow = workflow ?? {};
       const changedAreas = [
-        ...(draft.schemaJson === JSON.stringify(schema) ? [] : ["schema"]),
+        ...(draft.schemaJson === JSON.stringify(nextSchema) ? [] : ["schema"]),
         ...(draft.workflowJson === JSON.stringify(nextWorkflow)
           ? []
           : ["workflow"]),
+        ...(draft.versionName === resolvedVersionName ? [] : ["version_name"]),
       ];
       const [version] = await db
         .update(formVersions)
         .set({
-          schemaJson: JSON.stringify(schema),
+          versionName: resolvedVersionName,
+          schemaJson: JSON.stringify(nextSchema),
           workflowJson: JSON.stringify(nextWorkflow),
           updatedAt: new Date(),
         })
@@ -1516,15 +1590,15 @@ formsRouter.put(
         await recordFormBuilderActivity(req, {
           action: "Updated",
           operation: "form_draft_updated",
-          description: `Updated ${changedAreas.join(" and ")} on draft v${version.version} of form "${definition.name}" (${definition.key}).`,
+          description: `Updated ${changedAreas.join(" and ")} on draft v${version.version} of form "${resolvedFormName}" (${definition.key}).`,
           formDefinitionId: definition.id,
           formKey: definition.key,
-          formName: definition.name,
+          formName: resolvedFormName,
           formVersion: version.version,
           changedAreas: changedAreas.join(","),
         });
       }
-      res.json({ ...version, schema, workflow: nextWorkflow });
+      res.json({ ...version, versionName: resolvedVersionName, schema: nextSchema, workflow: nextWorkflow });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -1719,6 +1793,16 @@ formsRouter.post(
           error: "Form schema validation failed",
           details: validationErrors,
         });
+      const publishedFormName =
+        typeof schema.name === "string" && schema.name.trim()
+          ? schema.name.trim()
+          : definition.name;
+      if (publishedFormName !== definition.name) {
+        await db
+          .update(formDefinitions)
+          .set({ name: publishedFormName, updatedAt: new Date() })
+          .where(eq(formDefinitions.id, definition.id));
+      }
       await db
         .update(formVersions)
         .set({ status: "archived", updatedAt: new Date() })
@@ -1745,14 +1829,15 @@ formsRouter.post(
       await recordFormBuilderActivity(req, {
         action: "Published",
         operation: "form_version_published",
-        description: `Published v${published.version} of form "${definition.name}" (${definition.key})${retiredSuffix}.`,
+        description: `Published v${published.version} of form "${publishedFormName}" (${definition.key})${retiredSuffix}.`,
         formDefinitionId: definition.id,
         formKey: definition.key,
-        formName: definition.name,
+        formName: publishedFormName,
         formVersion: published.version,
       });
       res.json({
         ...published,
+        versionName: published.versionName ?? schema.versionName ?? null,
         schema: parseJson(published.schemaJson),
         workflow: parseJson(published.workflowJson),
         retiredKeys: retiredKeysList,

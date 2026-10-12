@@ -19,6 +19,8 @@ import { requirePermission } from "../middleware/auth.js";
 import { mapInternalRole } from "../auth/abilities.js";
 import { rateLimitAuthentication } from "../middleware/arcjet.js";
 import { config } from "../config/env.js";
+import { resolveLandingPage } from "../services/role-navigation.service.js";
+import { adminPasswordSchema } from "../domain/admin-account.js";
 import {
   authenticateLocalPassword,
   authenticatePendingSignup,
@@ -120,6 +122,7 @@ authRouter.post(
         res.status(401).json({ error: "Invalid email or password." });
         return;
       }
+      const landingPage = await resolveLandingPage(principal.user.role);
       const sessionToken = randomBytes(32).toString("base64url");
       const csrfToken = randomBytes(32).toString("base64url");
       const session = await createLocalSession(
@@ -137,7 +140,7 @@ authRouter.post(
       await writeAuthAudit("local_login_succeeded", principal.user);
       const user = await findActiveUserById(principal.user.id);
       res.json({
-        user: user ? publicUser(user) : principal.user,
+        user: { ...(user ? publicUser(user) : principal.user), landingPage },
         expiresAt: session.expiresAt,
       });
     } catch {
@@ -156,7 +159,9 @@ authRouter.get("/me", async (req: Request, res: Response) => {
     res.status(401).json({ error: "Authentication required." });
     return;
   }
-  res.json({ ...req.user, email: user.email, authMethod: req.authMethod });
+  try {
+    res.json({ ...req.user, email: user.email, authMethod: req.authMethod, landingPage: await resolveLandingPage(req.user.role) });
+  } catch { res.status(503).json({ error: "Unable to load account navigation settings." }); }
 });
 
 authRouter.post("/local/logout", async (req: Request, res: Response) => {
@@ -173,27 +178,33 @@ authRouter.post("/local/logout", async (req: Request, res: Response) => {
 });
 
 authRouter.post(
-  "/local/provision",
+  ["/local/provision", "/local/password"],
   requirePermission("manage", "all"),
+  rateLimitAuthentication,
   async (req: Request, res: Response) => {
-    const { userId, password } = req.body;
-    if (
-      typeof userId !== "string" ||
-      typeof password !== "string" ||
-      password.length < 12
-    ) {
+    const parsed = adminPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
       res
         .status(400)
         .json({
           error:
-            "userId and a password of at least 12 characters are required.",
+            "A valid userId and a password of 12 to 256 characters are required.",
         });
       return;
     }
+    const { userId, password } = parsed.data;
     const user = await findActiveUserById(userId);
     if (!user) {
       res.status(404).json({ error: "Active Fleet user not found." });
       return;
+    }
+    if (req.path === "/local/password") {
+      const [credential] = await db.select({ userId: localCredentials.userId })
+        .from(localCredentials).where(eq(localCredentials.userId, user.id));
+      if (!credential) {
+        res.status(409).json({ error: "This account has no Fleet-local password. Microsoft passwords are managed by Microsoft." });
+        return;
+      }
     }
     const subject = user.email.trim().toLowerCase();
     const [existingIdentity] = await db
@@ -249,8 +260,14 @@ authRouter.post(
               isNull(authSessions.revokedAt),
             ),
           );
+          await transaction.update(passwordResetTokens).set({ consumedAt: new Date() })
+            .where(and(eq(passwordResetTokens.userId, user.id), isNull(passwordResetTokens.consumedAt)));
       });
-      await writeAuthAudit("local_account_provisioned", req.user);
+          await writeAuthAudit(req.path === "/local/password" ? "local_password_changed_by_admin" : "local_account_provisioned", req.user, "info", user.id);
+          if (req.authMethod === "local" && req.user?.id === user.id) {
+            clearCookie(res, "fleet_session", true);
+            clearCookie(res, "fleet_csrf", false);
+          }
       res.status(204).end();
     } catch {
       res.status(500).json({ error: "Unable to provision local credentials." });

@@ -263,12 +263,24 @@ async function queryReport(
           )
             labels[key] = snapshot.label;
         }
+        const resolvedFormName =
+          typeof schema.name === "string" && schema.name.trim()
+            ? schema.name.trim()
+            : definition.name;
+        const resolvedVersionName =
+          typeof (version as any).versionName === "string" && (version as any).versionName.trim()
+            ? (version as any).versionName.trim()
+            : typeof schema.versionName === "string" && schema.versionName.trim()
+            ? schema.versionName.trim()
+            : `v${version.version}`;
+
         return {
           id: submission.id,
           submissionNumber: submission.submissionNumber,
           formKey: definition.key,
-          formName: definition.name,
+          formName: resolvedFormName,
           version: version.version,
+          versionName: resolvedVersionName,
           status: submission.status,
           stage: submission.stage,
           isLate: submission.isLate,
@@ -292,24 +304,11 @@ async function queryReport(
   );
 }
 
-reportsRouter.get("/forms", readSubmissions, async (req, res) => {
+reportsRouter.get("/forms", readSubmissions, async (_req, res) => {
   try {
     const rows = await db
       .selectDistinct({ key: formDefinitions.key, name: formDefinitions.name })
       .from(formDefinitions)
-      .innerJoin(
-        formVersions,
-        eq(formVersions.formDefinitionId, formDefinitions.id),
-      )
-      .innerJoin(
-        formSubmissions,
-        eq(formSubmissions.formVersionId, formVersions.id),
-      )
-      .where(
-        organizationScope(req)
-          ? undefined
-          : eq(formSubmissions.createdById, req.user!.id),
-      )
       .orderBy(asc(formDefinitions.name));
     res.json(rows);
   } catch (error) {
@@ -399,6 +398,7 @@ for (const kind of ["submissions", "activity"] as const) {
                 "formKey",
                 "formName",
                 "version",
+                "versionName",
                 "status",
                 "stage",
                 "isLate",

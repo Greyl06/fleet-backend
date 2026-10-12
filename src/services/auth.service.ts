@@ -119,6 +119,7 @@ export async function writeAuthAudit(
   action: string,
   user?: AuthUser,
   severity: "info" | "warning" = "info",
+  targetUserId?: string,
 ) {
   try {
     await db.insert(activityLogs).values({
@@ -128,7 +129,7 @@ export async function writeAuthAudit(
       module: "Authentication",
       description: action,
       severity,
-      metadataJson: user ? JSON.stringify({ userId: user.id }) : "{}",
+      metadataJson: user ? JSON.stringify({ userId: user.id, actorId: user.id, ...(targetUserId ? { targetUserId } : {}) }) : "{}",
     });
   } catch (error) {
     logger.error(

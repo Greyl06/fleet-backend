@@ -9,6 +9,11 @@ import { db, pool } from "../src/db/connection.js";
 import { ensureDatabaseAndTables } from "../src/db/migrate.js";
 import {
   activityLogs,
+  authIdentities,
+  authSessions,
+  localCredentials,
+  passwordResetTokens,
+  roleLoginRedirects,
   authSignupRequests,
   formDefinitions,
   formSubmissionEvents,
@@ -21,6 +26,7 @@ import {
 } from "../src/db/schema.js";
 import { tokenHash } from "../src/services/auth.service.js";
 import { defineAbilityFor, type Role } from "../src/auth/abilities.js";
+import { effectiveLandingPage } from "../src/domain/role-navigation.js";
 import {
   protectTsrfIntake,
   rateLimitApiWrite,
@@ -30,6 +36,77 @@ import {
 } from "../src/middleware/arcjet.js";
 
 describe("Hybrid authentication and signup approval", () => {
+  it("persists safe role landing pages without changing role permissions", async () => {
+    const [previous] = await db.select().from(roleLoginRedirects).where(eq(roleLoginRedirects.roleKey, "driver"));
+    try {
+      for (const role of ["driver", "auditor", "finance", "department_requester"]) {
+        expect((await request(app).patch("/api/roles/login-redirects/driver").set("x-user-role", role).send({ landingPage: "/reports" })).status).toBe(403);
+      }
+      for (const path of ["https://example.invalid", "//example.invalid", "/users", "/reports?next=https://example.invalid", "/unknown"]) {
+        expect((await request(app).patch("/api/roles/login-redirects/driver").send({ landingPage: path })).status).toBe(400);
+      }
+      expect((await request(app).patch("/api/roles/login-redirects/driver").send({ landingPage: "/reports" })).status).toBe(200);
+      const mine = await request(app).get("/api/roles/login-redirects/me").set("x-user-role", "driver");
+      expect(mine.body.landingPage).toBe("/reports");
+      expect((await request(app).get("/api/roles/login-redirects").set("x-user-role", "driver")).status).toBe(403);
+      const settings = await request(app).get("/api/roles/login-redirects");
+      expect(settings.body.find((row: { role: string }) => row.role === "driver").landingPage).toBe("/reports");
+      expect((await request(app).put("/api/roles/invalid-id").send({})).status).toBe(409);
+      expect(effectiveLandingPage("driver", "/users")).toBe("/fleet");
+      expect(effectiveLandingPage("auditor", "//example.invalid")).toBe("/reports");
+      expect((await request(app).patch("/api/roles/login-redirects/not-a-role").send({ landingPage: "/reports" })).status).toBe(404);
+    } finally {
+      if (previous) await db.update(roleLoginRedirects).set(previous).where(eq(roleLoginRedirects.roleKey, "driver"));
+      else await db.delete(roleLoginRedirects).where(eq(roleLoginRedirects.roleKey, "driver"));
+    }
+  });
+
+  it("allows only admins to change local passwords and invalidates sessions and reset links", async () => {
+    const [user] = await db.insert(users).values({ name: "Password Regression", email: `password-${randomUUID()}@example.invalid`, role: "admin", status: "active" }).returning();
+    const original = "Original-test-password-123";
+    const replacement = "Replacement-test-password-456";
+    try {
+      expect((await request(app).post("/api/auth/local/password").send({ userId: user.id, password: replacement })).status).toBe(409);
+      expect((await request(app).post("/api/auth/local/provision").send({ userId: user.id, password: original })).status).toBe(204);
+      const userList = await request(app).get("/api/users");
+      const listedUser = userList.body.find((row: { id: string }) => row.id === user.id);
+      expect(listedUser.hasLocalPassword).toBe(true);
+      expect(listedUser.passwordHash).toBeUndefined();
+      const login = await request(app).post("/api/auth/local/login").send({ email: user.email, password: original });
+      expect(login.status).toBe(200);
+      const cookies = login.headers["set-cookie"] as unknown as string[];
+      await db.insert(passwordResetTokens).values({ userId: user.id, tokenHash: tokenHash(randomUUID()), expiresAt: new Date(Date.now() + 60000) });
+      for (const role of ["auditor", "approver", "finance", "fleet_team", "department_requester", "procurement", "driver"]) {
+        expect((await request(app).post("/api/auth/local/password").set("x-user-role", role).send({ userId: user.id, password: replacement })).status).toBe(403);
+      }
+      expect((await request(app).post("/api/auth/local/password").set("Cookie", cookies).send({ userId: user.id, password: replacement })).status).toBe(403);
+      expect((await request(app).post("/api/auth/local/password").send({ userId: user.id, password: "short" })).status).toBe(400);
+      expect((await request(app).post("/api/auth/local/password").send({ userId: user.id, password: replacement })).status).toBe(204);
+      expect((await request(app).get("/api/auth/me").set("Cookie", cookies)).status).toBe(401);
+      expect((await request(app).post("/api/auth/local/login").send({ email: user.email, password: original })).status).toBe(401);
+      const replacementLogin = await request(app).post("/api/auth/local/login").send({ email: user.email, password: replacement });
+      expect(replacementLogin.status).toBe(200);
+      const replacementCookies = replacementLogin.headers["set-cookie"] as unknown as string[];
+      const csrfCookie = replacementCookies.find((cookie) => cookie.startsWith("fleet_csrf="))!;
+      const csrf = decodeURIComponent(csrfCookie.split(";")[0].slice("fleet_csrf=".length));
+      const selfChanged = await request(app).post("/api/auth/local/password").set("Cookie", replacementCookies).set("X-CSRF-Token", csrf).send({ userId: user.id, password: replacement });
+      expect(selfChanged.status).toBe(204);
+      expect(selfChanged.headers["set-cookie"].join(";")).toContain("fleet_session=; Path=/");
+      const [reset] = await db.select().from(passwordResetTokens).where(eq(passwordResetTokens.userId, user.id));
+      expect(reset.consumedAt).not.toBeNull();
+      const [credential] = await db.select().from(localCredentials).where(eq(localCredentials.userId, user.id));
+      expect(await argon2.verify(credential.passwordHash, replacement)).toBe(true);
+      const [audit] = await db.select().from(activityLogs).where(eq(activityLogs.action, "local_password_changed_by_admin"));
+      expect(audit.metadataJson).not.toContain(replacement);
+    } finally {
+      await db.delete(authSessions).where(eq(authSessions.userId, user.id));
+      await db.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, user.id));
+      await db.delete(localCredentials).where(eq(localCredentials.userId, user.id));
+      await db.delete(authIdentities).where(eq(authIdentities.userId, user.id));
+      await db.delete(users).where(eq(users.id, user.id));
+    }
+  });
+
   it("restricts audit history to admins and read-only auditors", async () => {
     for (const role of ["admin", "auditor", "finance", "approver", "fleet_team", "department_requester", "driver", "procurement"] as Role[]) {
       const ability = defineAbilityFor({ id: "policy-check", name: "Policy Check", role });
