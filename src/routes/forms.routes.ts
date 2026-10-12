@@ -1669,6 +1669,137 @@ formsRouter.put(
   },
 );
 
+formsRouter.patch(
+  "/versions/:id",
+  requirePermission("manage", "FormDefinition"),
+  async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.id);
+      const [targetVersion] = await db
+        .select()
+        .from(formVersions)
+        .where(eq(formVersions.id, versionId));
+
+      if (!targetVersion) {
+        return res.status(404).json({ error: "Form version not found" });
+      }
+
+      const { versionName } = req.body;
+      const resolvedVersionName =
+        typeof versionName === "string" && versionName.trim()
+          ? versionName.trim()
+          : null;
+
+      let nextSchemaJson = targetVersion.schemaJson;
+      try {
+        const parsed = parseJson(targetVersion.schemaJson);
+        if (isRecord(parsed)) {
+          if (resolvedVersionName) {
+            parsed.versionName = resolvedVersionName;
+          } else {
+            delete parsed.versionName;
+          }
+          nextSchemaJson = JSON.stringify(parsed);
+        }
+      } catch {
+        // preserve schemaJson as is
+      }
+
+      const [updated] = await db
+        .update(formVersions)
+        .set({
+          versionName: resolvedVersionName,
+          schemaJson: nextSchemaJson,
+          updatedAt: new Date(),
+        })
+        .where(eq(formVersions.id, targetVersion.id))
+        .returning();
+
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, targetVersion.formDefinitionId));
+
+      if (definition) {
+        await recordFormBuilderActivity(req, {
+          action: "Updated",
+          operation: "form_version_name_updated",
+          description: `Updated release label on v${targetVersion.version} of form "${definition.name}" to "${resolvedVersionName ?? "None"}".`,
+          formDefinitionId: definition.id,
+          formKey: definition.key,
+          formName: definition.name,
+          formVersion: targetVersion.version,
+        });
+      }
+
+      res.json({
+        ...updated,
+        versionName: resolvedVersionName,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
+formsRouter.patch(
+  "/:id",
+  requirePermission("manage", "FormDefinition"),
+  async (req: Request, res: Response) => {
+    try {
+      const identifier = String(req.params.id).trim();
+      const isUuid =
+        /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+          identifier,
+        );
+
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(
+          isUuid
+            ? or(
+                eq(formDefinitions.id, identifier),
+                eq(formDefinitions.key, identifier.toLowerCase()),
+              )
+            : eq(formDefinitions.key, identifier.toLowerCase()),
+        );
+
+      if (!definition) {
+        return res.status(404).json({ error: "Form definition not found" });
+      }
+
+      const { name } = req.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return res
+          .status(400)
+          .json({ error: "A valid form name is required." });
+      }
+
+      const trimmedName = name.trim();
+      const [updated] = await db
+        .update(formDefinitions)
+        .set({ name: trimmedName, updatedAt: new Date() })
+        .where(eq(formDefinitions.id, definition.id))
+        .returning();
+
+      await recordFormBuilderActivity(req, {
+        action: "Updated",
+        operation: "form_definition_renamed",
+        description: `Renamed form template from "${definition.name}" to "${trimmedName}" (${definition.key}).`,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: trimmedName,
+        formVersion: 0,
+      });
+
+      res.json(updated);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
 formsRouter.delete(
   "/versions/:id",
   requirePermission("manage", "FormDefinition"),
