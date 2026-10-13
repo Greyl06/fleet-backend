@@ -12,6 +12,7 @@ import { lovRouter } from "./routes/lov.routes.js";
 import { formsRouter } from "./routes/forms.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { reportsRouter } from "./routes/reports.routes.js";
+import { themeRouter } from "./routes/theme.routes.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { rateLimitApiWrite } from "./middleware/arcjet.js";
 import { activityAuditMiddleware } from "./middleware/activity-audit.js";
@@ -49,6 +50,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/lov", lovRouter);
 app.use("/api/forms", formsRouter);
 app.use("/api/reports", reportsRouter);
+app.use("/api/theme", themeRouter);
 
 // Central Error Handler
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {

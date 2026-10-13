@@ -39,7 +39,8 @@ function cookieValue(
 function isPublicRequest(req: Request): boolean {
   if (
     req.path === "/api/health" ||
-    req.path.startsWith("/api/forms/published/")
+    req.path.startsWith("/api/forms/published/") ||
+    (req.path === "/api/theme" && req.method === "GET")
   )
     return true;
   if (req.method === "GET" && req.path === "/api/auth/signup/options")

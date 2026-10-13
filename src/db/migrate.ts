@@ -562,6 +562,27 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         ('Roberto Santos', 'logistics@hulma.com', 'logistics_officer', 'Logistics & Dispatch', 'active'),
         ('Juan Dela Cruz', 'driver1@hulma.com', 'driver', 'Fleet Operations', 'active')
       ON CONFLICT (email) DO NOTHING;
+
+      -- System Themes (Organization-wide appearance settings)
+      CREATE TABLE IF NOT EXISTS system_themes (
+        id TEXT PRIMARY KEY DEFAULT 'default',
+        preset_name TEXT,
+        dark_vars_json TEXT NOT NULL,
+        light_vars_json TEXT NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      -- Seed Default Organization Theme
+      INSERT INTO system_themes (id, preset_name, dark_vars_json, light_vars_json, updated_by)
+      VALUES (
+        'default',
+        'Ocean Blue (Default)',
+        '{"background":{"h":222,"s":28,"l":8},"foreground":{"h":210,"s":40,"l":96},"card":{"h":222,"s":24,"l":11},"cardForeground":{"h":210,"s":40,"l":96},"primary":{"h":217,"s":91,"l":60},"primaryForeground":{"h":222,"s":47,"l":11},"secondary":{"h":217,"s":33,"l":17},"muted":{"h":217,"s":28,"l":16},"mutedForeground":{"h":215,"s":20,"l":55},"border":{"h":217,"s":24,"l":20},"accent":{"h":217,"s":28,"l":16},"radius":8,"fontSans":"Inter"}',
+        '{"background":{"h":220,"s":20,"l":97},"foreground":{"h":222,"s":47,"l":11},"card":{"h":0,"s":0,"l":100},"cardForeground":{"h":222,"s":47,"l":11},"primary":{"h":221,"s":83,"l":53},"primaryForeground":{"h":210,"s":40,"l":98},"secondary":{"h":215,"s":28,"l":93},"muted":{"h":215,"s":25,"l":93},"mutedForeground":{"h":215,"s":20,"l":46},"border":{"h":216,"s":20,"l":88},"accent":{"h":215,"s":25,"l":93},"radius":8,"fontSans":"Inter"}',
+        'System'
+      )
+      ON CONFLICT (id) DO NOTHING;
     `);
 
     logger.info("[Database] All tables initialized successfully.");

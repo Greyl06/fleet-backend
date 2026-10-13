@@ -548,3 +548,15 @@ export const formSubmissionEvents = pgTable("form_submission_events", {
   comment: text("comment"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+// ----------------------------------------------------
+// System Themes (Organization-wide appearance settings)
+// ----------------------------------------------------
+export const systemThemes = pgTable("system_themes", {
+  id: text("id").primaryKey().default("default"),
+  presetName: text("preset_name"),
+  darkVarsJson: text("dark_vars_json").notNull(),
+  lightVarsJson: text("light_vars_json").notNull(),
+  updatedBy: text("updated_by"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
