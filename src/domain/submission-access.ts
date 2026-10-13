@@ -28,7 +28,16 @@ export function createSubmissionAccessSchemas(z: typeof Zod) {
       page: z.coerce.number().int().min(1).default(1),
       pageSize: z.coerce.number().int().min(1).max(100).default(10),
       status: z
-        .enum(["all", "pending", "returned", "approved", "dispatched", "late"])
+        .enum([
+          "all",
+          "pending",
+          "returned",
+          "approved",
+          "dispatched",
+          "rejected",
+          "cancelled",
+          "late",
+        ])
         .default("all"),
       sla: z.enum(["all", "on_time", "late"]).default("all"),
       search: z.string().trim().max(200).default(""),

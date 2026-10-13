@@ -2634,6 +2634,93 @@ describe("Fleet Backend API Integration Tests", () => {
         'Field key "duplicate" is duplicated.',
       );
     });
+
+    it("should activate an archived version and archive the previous published version", async () => {
+      const key = `test-activate-${Date.now()}`;
+      const schema = {
+        key,
+        name: "Test Activate Form",
+        version: 1,
+        status: "draft",
+        sections: [
+          {
+            id: "request",
+            title: "Request",
+            fields: [
+              {
+                id: "title",
+                key: "title",
+                type: "text",
+                label: "Title",
+                section: "request",
+                required: true,
+              },
+            ],
+          },
+        ],
+      };
+      const workflow = {
+        initialStage: "submitted",
+        stages: [
+          {
+            id: "submitted",
+            label: "Submitted",
+            statusCategory: "in_review",
+            fieldPermissions: { title: { department_requester: "edit" } },
+          },
+          { id: "approved", label: "Approved", statusCategory: "approved" },
+        ],
+        transitions: [
+          { from: "submitted", to: "approved", roles: ["admin"], reasonRequired: false },
+        ],
+      };
+
+      const createRes = await request(app).post("/api/forms").send({
+        key,
+        name: "Test Activate Form",
+        schema,
+        workflow,
+      });
+      expect(createRes.status).toBe(201);
+      const v1Id = createRes.body.version.id;
+
+      // Publish v1
+      const pub1 = await publishRestrictedFixture(v1Id);
+      expect(pub1.status).toBe(200);
+      expect(pub1.body.status).toBe("published");
+
+      // Create and publish v2
+      const v2Res = await request(app)
+        .post(`/api/forms/${createRes.body.id}/versions`)
+        .send({ schema: { ...schema, version: 2 }, workflow });
+      expect(v2Res.status).toBe(201);
+      const v2Id = v2Res.body.id;
+      const pub2 = await publishRestrictedFixture(v2Id);
+      expect(pub2.status).toBe(200);
+      expect(pub2.body.status).toBe("published");
+
+      // Verify v1 is now archived
+      const [v1AfterV2] = await db
+        .select()
+        .from(formVersions)
+        .where(eq(formVersions.id, v1Id));
+      expect(v1AfterV2.status).toBe("archived");
+
+      // Activate v1 back to active/published
+      const activateRes = await request(app).post(
+        `/api/forms/versions/${v1Id}/activate`,
+      );
+      expect(activateRes.status).toBe(200);
+      expect(activateRes.body.status).toBe("published");
+      expect(activateRes.body.version).toBe(1);
+
+      // Verify v2 is now archived
+      const [v2AfterActivate] = await db
+        .select()
+        .from(formVersions)
+        .where(eq(formVersions.id, v2Id));
+      expect(v2AfterActivate.status).toBe("archived");
+    });
   });
 
   describe("Module B: Vehicle Registry & PMS Calculations", () => {

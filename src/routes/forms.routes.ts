@@ -967,20 +967,16 @@ formsRouter.get(
       returned: ["returned"],
       approved: ["approved"],
       dispatched: ["in_progress", "completed"],
+      rejected: ["rejected", "cancelled"],
+      cancelled: ["cancelled"],
     };
     const status = statusMatches[filters.status];
-    const where = and(
+    const baseWhere = and(
       base,
       filters.formVersionId
         ? eq(formSubmissions.formVersionId, filters.formVersionId)
         : undefined,
-      status
-        ? inArray(
-            formSubmissions.status,
-            status as Array<typeof formSubmissions.$inferSelect.status>,
-          )
-        : undefined,
-      filters.status === "late" || filters.sla === "late"
+      filters.sla === "late"
         ? eq(formSubmissions.isLate, true)
         : filters.sla === "on_time"
           ? eq(formSubmissions.isLate, false)
@@ -988,6 +984,16 @@ formsRouter.get(
       filters.search
         ? sql`position(lower(${filters.search}) in lower(${formSubmissions.submissionNumber})) > 0`
         : undefined,
+    );
+    const where = and(
+      baseWhere,
+      status
+        ? inArray(
+            formSubmissions.status,
+            status as Array<typeof formSubmissions.$inferSelect.status>,
+          )
+        : undefined,
+      filters.status === "late" ? eq(formSubmissions.isLate, true) : undefined,
     );
     const result = await db.transaction(
       async (transaction) => {
@@ -1005,13 +1011,14 @@ formsRouter.get(
           )
           .where(base)
           .orderBy(desc(formVersions.version));
-        const [summary] = await transaction
+        const [counts] = await transaction
           .select({
-            total: sql<number>`count(*)::int`,
+            all: sql<number>`count(*)::int`,
             pending: sql<number>`count(*) filter (where ${formSubmissions.status} in ('draft', 'in_review'))::int`,
             returned: sql<number>`count(*) filter (where ${formSubmissions.status} = 'returned')::int`,
             approved: sql<number>`count(*) filter (where ${formSubmissions.status} = 'approved')::int`,
             dispatched: sql<number>`count(*) filter (where ${formSubmissions.status} in ('in_progress', 'completed'))::int`,
+            rejected: sql<number>`count(*) filter (where ${formSubmissions.status} in ('rejected', 'cancelled'))::int`,
             late: sql<number>`count(*) filter (where ${formSubmissions.isLate})::int`,
           })
           .from(formSubmissions)
@@ -1019,7 +1026,27 @@ formsRouter.get(
             formVersions,
             eq(formSubmissions.formVersionId, formVersions.id),
           )
-          .where(where);
+          .where(baseWhere);
+        const [filtered] = status || filters.status === "late"
+          ? await transaction
+              .select({ total: sql<number>`count(*)::int` })
+              .from(formSubmissions)
+              .innerJoin(
+                formVersions,
+                eq(formSubmissions.formVersionId, formVersions.id),
+              )
+              .where(where)
+          : [{ total: counts.all }];
+        const summary = {
+          total: filtered.total,
+          all: counts.all,
+          pending: counts.pending,
+          returned: counts.returned,
+          approved: counts.approved,
+          dispatched: counts.dispatched,
+          rejected: counts.rejected,
+          late: counts.late,
+        };
         const records = await transaction
           .select({ submission: formSubmissions, version: formVersions })
           .from(formSubmissions)
@@ -2672,3 +2699,100 @@ formsRouter.post(
     }
   },
 );
+
+formsRouter.post(
+  "/versions/:id/activate",
+  requirePermission("manage", "FormDefinition"),
+  async (req: Request, res: Response) => {
+    try {
+      const isUuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          String(req.params.id),
+        );
+      const [targetVersion] = await db
+        .select()
+        .from(formVersions)
+        .where(
+          isUuid
+            ? eq(formVersions.id, String(req.params.id))
+            : eq(formVersions.version, Number(req.params.id)),
+        );
+      if (!targetVersion)
+        return res.status(404).json({ error: "Form version not found" });
+
+      const [definition] = await db
+        .select()
+        .from(formDefinitions)
+        .where(eq(formDefinitions.id, targetVersion.formDefinitionId));
+      if (!definition)
+        return res.status(404).json({ error: "Form definition not found" });
+
+      const schema = parseJson(targetVersion.schemaJson);
+      const formTitle =
+        typeof schema.name === "string" && schema.name.trim()
+          ? schema.name.trim()
+          : definition.name;
+
+      const activated = await db.transaction(async (transaction) => {
+        await transaction
+          .select({ id: formDefinitions.id })
+          .from(formDefinitions)
+          .where(eq(formDefinitions.id, targetVersion.formDefinitionId))
+          .for("update");
+
+        // Archive any currently published versions for this form
+        await transaction
+          .update(formVersions)
+          .set({ status: "archived", updatedAt: new Date() })
+          .where(
+            and(
+              eq(formVersions.formDefinitionId, targetVersion.formDefinitionId),
+              eq(formVersions.status, "published"),
+            ),
+          );
+
+        // Promote the target version to published
+        const [next] = await transaction
+          .update(formVersions)
+          .set({
+            status: "published",
+            publishedBy: req.user?.name ?? "system",
+            publishedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(formVersions.id, targetVersion.id))
+          .returning();
+
+        // Update master form template name if needed
+        if (formTitle !== definition.name) {
+          await transaction
+            .update(formDefinitions)
+            .set({ name: formTitle, updatedAt: new Date() })
+            .where(eq(formDefinitions.id, definition.id));
+        }
+
+        return next;
+      });
+
+      await recordFormBuilderActivity(req, {
+        action: "Activated",
+        operation: "form_version_activated",
+        description: `Set version v${activated.version} of form "${formTitle}" (${definition.key}) as active.`,
+        formDefinitionId: definition.id,
+        formKey: definition.key,
+        formName: formTitle,
+        formVersion: activated.version,
+      });
+
+      res.json({
+        ...activated,
+        versionName: activated.versionName ?? schema.versionName ?? null,
+        schema: parseJson(activated.schemaJson),
+        workflow: parseJson(activated.workflowJson),
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  },
+);
+
