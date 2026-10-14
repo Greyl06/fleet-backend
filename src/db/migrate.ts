@@ -435,8 +435,24 @@ export async function ensureDatabaseAndTables(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS form_submissions_version_created_idx
         ON form_submissions(form_version_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_form_submissions_lookup
+        ON form_submissions(form_version_id, status, created_at DESC);
       CREATE INDEX IF NOT EXISTS form_submission_events_submission_created_idx
         ON form_submission_events(submission_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_form_submission_events_submission
+        ON form_submission_events(submission_id, created_at ASC);
+
+      -- Foreign Key & Performance Indexes (TICKET-105)
+      CREATE INDEX IF NOT EXISTS idx_pms_records_vehicle ON pms_records(vehicle_id);
+      CREATE INDEX IF NOT EXISTS idx_repair_work_orders_vehicle ON repair_work_orders(vehicle_id);
+      CREATE INDEX IF NOT EXISTS idx_repair_work_orders_pr ON repair_work_orders(linked_pr_id);
+      CREATE INDEX IF NOT EXISTS idx_incident_reports_vehicle ON incident_reports(vehicle_id);
+      CREATE INDEX IF NOT EXISTS idx_incident_reports_repair_wo ON incident_reports(repair_work_order_id);
+      CREATE INDEX IF NOT EXISTS idx_tsrf_requests_assigned_vehicle ON tsrf_requests(assigned_vehicle_id);
+      CREATE INDEX IF NOT EXISTS idx_tsrf_requests_dept_head ON tsrf_requests(department_head_user_id);
+      CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lov_items_list ON lov_items(list_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_lov_items_list_code ON lov_items(list_id, code);
 
       -- Generic LOV seed is additive; legacy reference tables remain supported.
       INSERT INTO lov_lists (code, name, description, is_system) VALUES

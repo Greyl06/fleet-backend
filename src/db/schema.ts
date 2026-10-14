@@ -5,6 +5,7 @@ import {
   timestamp,
   boolean,
   uuid,
+  index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
@@ -63,133 +64,158 @@ export const purchaseRequisitions = pgTable("purchase_requisitions", {
 // ----------------------------------------------------
 // PMS Records (Module B - 5,000 KM Tracking)
 // ----------------------------------------------------
-export const pmsRecords = pgTable("pms_records", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  vehicleId: uuid("vehicle_id")
-    .notNull()
-    .references(() => vehicles.id),
-  pmsKm: integer("pms_km").notNull(),
-  status: text("status", {
-    enum: ["scheduled", "in_progress", "completed", "skipped"],
-  })
-    .notNull()
-    .default("scheduled"),
-  notes: text("notes"),
-  completedAt: timestamp("completed_at"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const pmsRecords = pgTable(
+  "pms_records",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    vehicleId: uuid("vehicle_id")
+      .notNull()
+      .references(() => vehicles.id),
+    pmsKm: integer("pms_km").notNull(),
+    status: text("status", {
+      enum: ["scheduled", "in_progress", "completed", "skipped"],
+    })
+      .notNull()
+      .default("scheduled"),
+    notes: text("notes"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [index("idx_pms_records_vehicle").on(table.vehicleId)],
+);
 
 // ----------------------------------------------------
 // Repair Work Orders (Module B & C)
 // ----------------------------------------------------
-export const repairWorkOrders = pgTable("repair_work_orders", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  workOrderNumber: text("work_order_number").notNull().unique(),
-  vehicleId: uuid("vehicle_id")
-    .notNull()
-    .references(() => vehicles.id),
-  description: text("description").notNull(),
-  status: text("status", {
-    enum: ["pending", "approved", "in_progress", "completed", "rejected"],
-  })
-    .notNull()
-    .default("pending"),
-  linkedPrId: uuid("linked_pr_id").references(() => purchaseRequisitions.id),
-  hasPmsCompliance: boolean("has_pms_compliance").notNull().default(false),
-  incidentReportFiled: boolean("incident_report_filed")
-    .notNull()
-    .default(false),
-  procurementFulfillmentStatus: text("procurement_fulfillment_status", {
-    enum: [
-      "pending_pr_approval",
-      "pr_approved",
-      "in_maintenance",
-      "work_completed",
-      "vehicle_operational",
-    ],
-  })
-    .notNull()
-    .default("pending_pr_approval"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const repairWorkOrders = pgTable(
+  "repair_work_orders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workOrderNumber: text("work_order_number").notNull().unique(),
+    vehicleId: uuid("vehicle_id")
+      .notNull()
+      .references(() => vehicles.id),
+    description: text("description").notNull(),
+    status: text("status", {
+      enum: ["pending", "approved", "in_progress", "completed", "rejected"],
+    })
+      .notNull()
+      .default("pending"),
+    linkedPrId: uuid("linked_pr_id").references(() => purchaseRequisitions.id),
+    hasPmsCompliance: boolean("has_pms_compliance").notNull().default(false),
+    incidentReportFiled: boolean("incident_report_filed")
+      .notNull()
+      .default(false),
+    procurementFulfillmentStatus: text("procurement_fulfillment_status", {
+      enum: [
+        "pending_pr_approval",
+        "pr_approved",
+        "in_maintenance",
+        "work_completed",
+        "vehicle_operational",
+      ],
+    })
+      .notNull()
+      .default("pending_pr_approval"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_repair_work_orders_vehicle").on(table.vehicleId),
+    index("idx_repair_work_orders_pr").on(table.linkedPrId),
+  ],
+);
 
 // ----------------------------------------------------
 // Incident Reports (Module B - Skipped PMS Mandatory Gate)
 // ----------------------------------------------------
-export const incidentReports = pgTable("incident_reports", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  vehicleId: uuid("vehicle_id")
-    .notNull()
-    .references(() => vehicles.id),
-  repairWorkOrderId: uuid("repair_work_order_id").references(
-    () => repairWorkOrders.id,
-  ),
-  reportedBy: text("reported_by").notNull(),
-  incidentDate: timestamp("incident_date").notNull(),
-  reason: text("reason").notNull(),
-  damagesDescription: text("damages_description").notNull(),
-  preventativeAction: text("preventative_action"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const incidentReports = pgTable(
+  "incident_reports",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    vehicleId: uuid("vehicle_id")
+      .notNull()
+      .references(() => vehicles.id),
+    repairWorkOrderId: uuid("repair_work_order_id").references(
+      () => repairWorkOrders.id,
+    ),
+    reportedBy: text("reported_by").notNull(),
+    incidentDate: timestamp("incident_date").notNull(),
+    reason: text("reason").notNull(),
+    damagesDescription: text("damages_description").notNull(),
+    preventativeAction: text("preventative_action"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_incident_reports_vehicle").on(table.vehicleId),
+    index("idx_incident_reports_repair_wo").on(table.repairWorkOrderId),
+  ],
+);
 
 // ----------------------------------------------------
 // Transportation Service Requests - TSRF (Module A)
 // ----------------------------------------------------
-export const tsrfRequests = pgTable("tsrf_requests", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  requestNumber: text("request_number").notNull().unique(),
-  department: text("department").notNull(),
-  departmentCode: text("department_code"),
-  departmentHeadUserId: uuid("department_head_user_id").references(
-    () => users.id,
-    { onDelete: "set null" },
-  ),
-  projectName: text("project_name").notNull(),
-  origin: text("origin").notNull(),
-  destination: text("destination").notNull(),
-  // Multi-stop routing & Google Maps addresses stored as JSON array string
-  stopsJson: text("stops_json").notNull().default("[]"),
-  // Driver & Passenger Manifests stored as JSON array string
-  passengersJson: text("passengers_json").notNull().default("[]"),
-  // Cargo & equipment control stored as JSON array string
-  cargoJson: text("cargo_json").notNull().default("[]"),
-  vehicleType: text("vehicle_type").notNull().default("commuter_van"),
-  assignedVehicleId: uuid("assigned_vehicle_id").references(() => vehicles.id),
-  assignedDriver: text("assigned_driver"),
-  departureDate: timestamp("departure_date").notNull(),
-  callTime: text("call_time").notNull(),
-  startingKm: integer("starting_km"),
-  endingKm: integer("ending_km"),
-  isFlaggedAfterCutoff: boolean("is_flagged_after_cutoff")
-    .notNull()
-    .default(false),
-  cutoffReason: text("cutoff_reason"),
-  approvalStatus: text("approval_status", {
-    enum: [
-      "pending",
-      "dept_approved",
-      "logistics_approved",
-      "finance_approved",
-      "rejected",
-    ],
-  })
-    .notNull()
-    .default("pending"),
-  linkedPrId: uuid("linked_pr_id").references(() => purchaseRequisitions.id),
-  tripStatus: text("trip_status", {
-    enum: [
-      "requested",
-      "approved",
-      "dispatched",
-      "in_transit",
-      "completed",
-      "cancelled",
-    ],
-  })
-    .notNull()
-    .default("requested"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const tsrfRequests = pgTable(
+  "tsrf_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    requestNumber: text("request_number").notNull().unique(),
+    department: text("department").notNull(),
+    departmentCode: text("department_code"),
+    departmentHeadUserId: uuid("department_head_user_id").references(
+      () => users.id,
+      { onDelete: "set null" },
+    ),
+    projectName: text("project_name").notNull(),
+    origin: text("origin").notNull(),
+    destination: text("destination").notNull(),
+    // Multi-stop routing & Google Maps addresses stored as JSON array string
+    stopsJson: text("stops_json").notNull().default("[]"),
+    // Driver & Passenger Manifests stored as JSON array string
+    passengersJson: text("passengers_json").notNull().default("[]"),
+    // Cargo & equipment control stored as JSON array string
+    cargoJson: text("cargo_json").notNull().default("[]"),
+    vehicleType: text("vehicle_type").notNull().default("commuter_van"),
+    assignedVehicleId: uuid("assigned_vehicle_id").references(() => vehicles.id),
+    assignedDriver: text("assigned_driver"),
+    departureDate: timestamp("departure_date").notNull(),
+    callTime: text("call_time").notNull(),
+    startingKm: integer("starting_km"),
+    endingKm: integer("ending_km"),
+    isFlaggedAfterCutoff: boolean("is_flagged_after_cutoff")
+      .notNull()
+      .default(false),
+    cutoffReason: text("cutoff_reason"),
+    approvalStatus: text("approval_status", {
+      enum: [
+        "pending",
+        "dept_approved",
+        "logistics_approved",
+        "finance_approved",
+        "rejected",
+      ],
+    })
+      .notNull()
+      .default("pending"),
+    linkedPrId: uuid("linked_pr_id").references(() => purchaseRequisitions.id),
+    tripStatus: text("trip_status", {
+      enum: [
+        "requested",
+        "approved",
+        "dispatched",
+        "in_transit",
+        "completed",
+        "cancelled",
+      ],
+    })
+      .notNull()
+      .default("requested"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_tsrf_requests_assigned_vehicle").on(table.assignedVehicleId),
+    index("idx_tsrf_requests_dept_head").on(table.departmentHeadUserId),
+  ],
+);
 
 // ----------------------------------------------------
 // Roles & Permissions (Dynamic RBAC)
@@ -376,21 +402,25 @@ export const vendors = pgTable("vendors", {
 // ----------------------------------------------------
 // Activity & Maintenance Audit Log
 // ----------------------------------------------------
-export const activityLogs = pgTable("activity_logs", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  userName: text("user_name").notNull(),
-  userRole: text("user_role").notNull(),
-  action: text("action").notNull(),
-  module: text("module").notNull(),
-  description: text("description").notNull(),
-  severity: text("severity", {
-    enum: ["info", "warning", "critical", "success"],
-  })
-    .notNull()
-    .default("info"),
-  metadataJson: text("metadata_json").notNull().default("{}"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const activityLogs = pgTable(
+  "activity_logs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userName: text("user_name").notNull(),
+    userRole: text("user_role").notNull(),
+    action: text("action").notNull(),
+    module: text("module").notNull(),
+    description: text("description").notNull(),
+    severity: text("severity", {
+      enum: ["info", "warning", "critical", "success"],
+    })
+      .notNull()
+      .default("info"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [index("idx_activity_logs_created_at").on(table.createdAt)],
+);
 
 // ----------------------------------------------------
 // LOV Engine — Generic List-of-Values
@@ -426,27 +456,34 @@ export const lovAttributes = pgTable("lov_attributes", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const lovItems = pgTable("lov_items", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  listId: uuid("list_id")
-    .notNull()
-    .references(() => lovLists.id, { onDelete: "cascade" }),
-  parentId: uuid("parent_id"),
-  code: text("code").notNull(),
-  label: text("label").notNull(),
-  sortOrder: integer("sort_order").notNull().default(0),
-  status: text("status", { enum: ["active", "inactive"] })
-    .notNull()
-    .default("active"),
-  effectiveFrom: timestamp("effective_from"),
-  effectiveTo: timestamp("effective_to"),
-  attrsJson: text("attrs_json").notNull().default("{}"),
-  approvalUserId: uuid("approval_user_id").references(() => users.id, {
-    onDelete: "set null",
-  }),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+export const lovItems = pgTable(
+  "lov_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    listId: uuid("list_id")
+      .notNull()
+      .references(() => lovLists.id, { onDelete: "cascade" }),
+    parentId: uuid("parent_id"),
+    code: text("code").notNull(),
+    label: text("label").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status", { enum: ["active", "inactive"] })
+      .notNull()
+      .default("active"),
+    effectiveFrom: timestamp("effective_from"),
+    effectiveTo: timestamp("effective_to"),
+    attrsJson: text("attrs_json").notNull().default("{}"),
+    approvalUserId: uuid("approval_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("lov_items_list_id_code_uq").on(table.listId, table.code),
+    index("idx_lov_items_list_id").on(table.listId),
+  ],
+);
 
 // ----------------------------------------------------
 // Dynamic Form Definitions and Versions
@@ -498,56 +535,75 @@ export const formVersionReadAccessRevisions = pgTable(
   }),
 );
 
-export const formSubmissions = pgTable("form_submissions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  submissionNumber: text("submission_number").notNull().unique(),
-  formVersionId: uuid("form_version_id")
-    .notNull()
-    .references(() => formVersions.id),
-  status: text("status", {
-    enum: [
-      "draft",
-      "in_review",
-      "returned",
-      "approved",
-      "in_progress",
-      "completed",
-      "rejected",
-      "cancelled",
-    ],
-  })
-    .notNull()
-    .default("in_review"),
-  stage: text("stage").notNull(),
-  departmentHeadUserId: uuid("department_head_user_id").references(
-    () => users.id,
-    { onDelete: "set null" },
-  ),
-  isLate: boolean("is_late").notNull().default(false),
-  cutoffReason: text("cutoff_reason"),
-  dataJson: text("data_json").notNull(),
-  labelSnapshotsJson: text("label_snapshots_json").notNull().default("{}"),
-  createdById: text("created_by_id").notNull(),
-  createdByName: text("created_by_name").notNull(),
-  createdByRole: text("created_by_role").notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+export const formSubmissions = pgTable(
+  "form_submissions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    submissionNumber: text("submission_number").notNull().unique(),
+    formVersionId: uuid("form_version_id")
+      .notNull()
+      .references(() => formVersions.id),
+    status: text("status", {
+      enum: [
+        "draft",
+        "in_review",
+        "returned",
+        "approved",
+        "in_progress",
+        "completed",
+        "rejected",
+        "cancelled",
+      ],
+    })
+      .notNull()
+      .default("in_review"),
+    stage: text("stage").notNull(),
+    departmentHeadUserId: uuid("department_head_user_id").references(
+      () => users.id,
+      { onDelete: "set null" },
+    ),
+    isLate: boolean("is_late").notNull().default(false),
+    cutoffReason: text("cutoff_reason"),
+    dataJson: text("data_json").notNull(),
+    labelSnapshotsJson: text("label_snapshots_json").notNull().default("{}"),
+    createdById: text("created_by_id").notNull(),
+    createdByName: text("created_by_name").notNull(),
+    createdByRole: text("created_by_role").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_form_submissions_lookup").on(
+      table.formVersionId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
 
-export const formSubmissionEvents = pgTable("form_submission_events", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  submissionId: uuid("submission_id")
-    .notNull()
-    .references(() => formSubmissions.id, { onDelete: "cascade" }),
-  fromStage: text("from_stage"),
-  toStage: text("to_stage").notNull(),
-  action: text("action").notNull(),
-  actorId: text("actor_id").notNull(),
-  actorName: text("actor_name").notNull(),
-  actorRole: text("actor_role").notNull(),
-  comment: text("comment"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const formSubmissionEvents = pgTable(
+  "form_submission_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    submissionId: uuid("submission_id")
+      .notNull()
+      .references(() => formSubmissions.id, { onDelete: "cascade" }),
+    fromStage: text("from_stage"),
+    toStage: text("to_stage").notNull(),
+    action: text("action").notNull(),
+    actorId: text("actor_id").notNull(),
+    actorName: text("actor_name").notNull(),
+    actorRole: text("actor_role").notNull(),
+    comment: text("comment"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_form_submission_events_submission").on(
+      table.submissionId,
+      table.createdAt,
+    ),
+  ],
+);
 
 // ----------------------------------------------------
 // System Themes (Organization-wide appearance settings)
