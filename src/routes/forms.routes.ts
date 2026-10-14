@@ -1393,14 +1393,10 @@ formsRouter.post(
 
       const workflow = parseJson(version.workflowJson);
       const { stages, transitions } = workflowParts(workflow);
-      const transition = transitions.find(
+      let transition = transitions.find(
         (candidate) =>
           candidate.from === submission.stage && candidate.to === toStage,
       );
-      if (!transition)
-        return res
-          .status(409)
-          .json({ error: "Workflow transition is not configured" });
       const currentStage = stages.find(
         (stage) => stage.id === submission.stage,
       );
@@ -1411,6 +1407,18 @@ formsRouter.post(
         currentStage?.statusCategory === "returned" &&
         toStage === workflow.initialStage &&
         targetStage?.statusCategory === "in_review";
+      if (!transition && isOwnerResubmission && toStage === workflow.initialStage) {
+        transition = {
+          from: submission.stage,
+          to: toStage,
+          roles: ["department_requester", "admin"],
+          action: "resubmitted",
+        };
+      }
+      if (!transition)
+        return res
+          .status(409)
+          .json({ error: "Workflow transition is not configured" });
       const allowedRoles = Array.isArray(transition.roles)
         ? transition.roles
         : typeof transition.role === "string"
@@ -1762,23 +1770,31 @@ formsRouter.get(
           ? workflow.initialStage
           : null;
       const initialStage = stages.find((stage) => stage.id === initialStageId);
-      const hasOwnerResubmitTransition = transitions.some((transition) => {
-        const roles = Array.isArray(transition.roles)
-          ? transition.roles
-          : typeof transition.role === "string"
-            ? [transition.role]
-            : [];
-        return (
-          transition.from === submission.stage &&
-          transition.to === initialStageId &&
-          roles.includes(req.user?.role ?? "")
-        );
-      });
+      const isReturnedStage =
+        stages.find((stage) => stage.id === submission.stage)
+          ?.statusCategory === "returned";
+      const hasOwnerResubmitTransition =
+        transitions.some((transition) => {
+          const roles = Array.isArray(transition.roles)
+            ? transition.roles
+            : typeof transition.role === "string"
+              ? [transition.role]
+              : [];
+          return (
+            transition.from === submission.stage &&
+            transition.to === initialStageId &&
+            roles.includes(req.user?.role ?? "")
+          );
+        }) ||
+        (isReturnedStage &&
+          initialStage?.statusCategory === "in_review" &&
+          (req.user?.role === "department_requester" ||
+            req.user?.role === "admin" ||
+            submission.createdById === req.user?.id));
       const resubmitStage =
         strictFieldAccess &&
         submission.createdById === req.user?.id &&
-        stages.find((stage) => stage.id === submission.stage)
-          ?.statusCategory === "returned" &&
+        isReturnedStage &&
         initialStage?.statusCategory === "in_review" &&
         hasOwnerResubmitTransition
           ? initialStageId
