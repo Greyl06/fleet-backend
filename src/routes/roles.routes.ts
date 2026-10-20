@@ -36,6 +36,12 @@ rolesRouter.patch("/login-redirects/:role", requirePermission("manage", "all"), 
     await db.insert(roleLoginRedirects).values({ roleKey: role, landingPage: parsed.data.landingPage, updatedById: req.user!.id }).onConflictDoUpdate({
       target: roleLoginRedirects.roleKey, set: { landingPage: parsed.data.landingPage, updatedById: req.user!.id, updatedAt: new Date() },
     });
+    const rawRole = String(req.params.role);
+    if (rawRole && rawRole !== role) {
+      await db.insert(roleLoginRedirects).values({ roleKey: rawRole, landingPage: parsed.data.landingPage, updatedById: req.user!.id }).onConflictDoUpdate({
+        target: roleLoginRedirects.roleKey, set: { landingPage: parsed.data.landingPage, updatedById: req.user!.id, updatedAt: new Date() },
+      });
+    }
     res.locals.roleRedirectAudit = { roleKey: role, landingPage: parsed.data.landingPage };
     res.json({ landingPage: parsed.data.landingPage });
   } catch { res.status(500).json({ error: "Unable to save role landing page." }); }

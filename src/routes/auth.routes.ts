@@ -154,14 +154,43 @@ authRouter.get("/me", async (req: Request, res: Response) => {
     res.status(401).json({ error: "Authentication required." });
     return;
   }
-  const user = await findActiveUserById(req.user.id);
+  let user: typeof users.$inferSelect | null = null;
+  try {
+    user = await findActiveUserById(req.user.id);
+  } catch {
+    // In dev mode, req.user.id may not be a UUID (e.g., 'u-2')
+  }
+  if (!user && req.authMethod === "development") {
+    try {
+      const email =
+        (req.headers["x-user-email"] as string) ||
+        `${req.user.name.toLowerCase().replace(/[^a-z0-9]+/g, ".")}@hulma.com`;
+      res.json({
+        ...req.user,
+        email,
+        authMethod: req.authMethod,
+        landingPage: await resolveLandingPage(req.user.role),
+      });
+      return;
+    } catch {
+      res.status(503).json({ error: "Unable to load account navigation settings." });
+      return;
+    }
+  }
   if (!user) {
     res.status(401).json({ error: "Authentication required." });
     return;
   }
   try {
-    res.json({ ...req.user, email: user.email, authMethod: req.authMethod, landingPage: await resolveLandingPage(req.user.role) });
-  } catch { res.status(503).json({ error: "Unable to load account navigation settings." }); }
+    res.json({
+      ...req.user,
+      email: user.email,
+      authMethod: req.authMethod,
+      landingPage: await resolveLandingPage(req.user.role),
+    });
+  } catch {
+    res.status(503).json({ error: "Unable to load account navigation settings." });
+  }
 });
 
 authRouter.post("/local/logout", async (req: Request, res: Response) => {

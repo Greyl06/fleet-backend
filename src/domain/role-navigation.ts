@@ -9,6 +9,7 @@ const allRoles = Object.keys(defaultLandingPages) as Role[];
 export const landingPages = [
   { path: "/dashboard", label: "Dashboard", roles: allRoles.filter((role) => role !== "auditor") },
   { path: "/fleet", label: "Fleet & KM Monitoring", roles: ["admin", "fleet_team", "procurement", "driver"] },
+  { path: "/driver", label: "Driver Quick Log", roles: ["admin", "driver", "fleet_team"] },
   { path: "/tsrf", label: "TSRF Logistics", roles: ["admin", "fleet_team", "approver", "department_requester"] },
   { path: "/procurement", label: "PR Gatekeeper", roles: ["admin", "fleet_team", "procurement", "finance"] },
   { path: "/reports", label: "Reports", roles: allRoles.filter((role) => role !== "procurement") },
