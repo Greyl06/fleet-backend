@@ -754,4 +754,76 @@ describe("Hybrid authentication and signup approval", () => {
       await db.delete(activityLogs).where(eq(activityLogs.userName, actorName));
     }
   });
+
+  it("revokes all active sessions for a user when logging out, invalidating other open browsers", async () => {
+    const [user] = await db
+      .insert(users)
+      .values({
+        name: "Cross Browser Logout Test",
+        email: `cross-browser-${randomUUID()}@example.invalid`,
+        role: "admin",
+        status: "active",
+      })
+      .returning();
+    const password = "CrossBrowser-Password-2026!";
+    try {
+      // Provision credentials
+      await request(app)
+        .post("/api/auth/local/provision")
+        .send({ userId: user.id, password });
+
+      // Simulate Browser 1 login
+      const login1 = await request(app)
+        .post("/api/auth/local/login")
+        .send({ email: user.email, password });
+      expect(login1.status).toBe(200);
+      const cookiesBrowser1 = login1.headers["set-cookie"] as unknown as string[];
+
+      // Simulate Browser 2 login
+      const login2 = await request(app)
+        .post("/api/auth/local/login")
+        .send({ email: user.email, password });
+      expect(login2.status).toBe(200);
+      const cookiesBrowser2 = login2.headers["set-cookie"] as unknown as string[];
+
+      // Verify both browsers have active sessions
+      const me1Before = await request(app)
+        .get("/api/auth/me")
+        .set("Cookie", cookiesBrowser1);
+      expect(me1Before.status).toBe(200);
+
+      const me2Before = await request(app)
+        .get("/api/auth/me")
+        .set("Cookie", cookiesBrowser2);
+      expect(me2Before.status).toBe(200);
+
+      // Browser 1 logs out
+      const csrfCookie = cookiesBrowser1.find((cookie) => cookie.startsWith("fleet_csrf="))!;
+      const csrf = decodeURIComponent(csrfCookie.split(";")[0].slice("fleet_csrf=".length));
+      const logoutRes = await request(app)
+        .post("/api/auth/local/logout")
+        .set("Cookie", cookiesBrowser1)
+        .set("X-CSRF-Token", csrf);
+      expect(logoutRes.status).toBe(200);
+
+      // Browser 1 session is now invalid (401)
+      const me1After = await request(app)
+        .get("/api/auth/me")
+        .set("Cookie", cookiesBrowser1);
+      expect(me1After.status).toBe(401);
+
+      // Browser 2 session MUST ALSO be invalid (401)
+      const me2After = await request(app)
+        .get("/api/auth/me")
+        .set("Cookie", cookiesBrowser2);
+      expect(me2After.status).toBe(401);
+      expect(me2After.body.message).toContain("invalid or expired");
+    } finally {
+      await db.delete(authSessions).where(eq(authSessions.userId, user.id));
+      await db.delete(localCredentials).where(eq(localCredentials.userId, user.id));
+      await db.delete(authIdentities).where(eq(authIdentities.userId, user.id));
+      await db.delete(users).where(eq(users.id, user.id));
+    }
+  });
 });
+

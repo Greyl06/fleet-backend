@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { systemThemes } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
+import { logger } from "../config/logger.js";
 
 export const themeRouter = Router();
 
@@ -148,8 +149,8 @@ themeRouter.put("/", requirePermission("manage", "all"), async (req: Request, re
       updatedAt: saved.updatedAt,
     });
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: "Failed to persist organization theme", message: error.message });
+    logger.error({ err }, "Failed to persist organization theme");
+    res.status(500).json({ error: "Failed to persist organization theme" });
   }
 });
 
@@ -189,7 +190,7 @@ themeRouter.post("/reset", requirePermission("manage", "all"), async (req: Reque
       updatedAt: saved.updatedAt,
     });
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: "Failed to reset theme", message: error.message });
+    logger.error({ err }, "Failed to reset theme");
+    res.status(500).json({ error: "Failed to reset theme" });
   }
 });

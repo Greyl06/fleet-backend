@@ -118,6 +118,44 @@ describe('Fleet TCO & Cost-per-Kilometer (CPK) Domain Calculations', () => {
     // Monthly trend contains last 6 months
     expect(summary.monthlyTrend.length).toBe(6);
   });
+
+  it('preserves event counts when monthly spend is database-aggregated', () => {
+    const vehicle: VehicleCostData = {
+      vehicleId: 'aggregate-vehicle',
+      plateNumber: 'AGG-1001',
+      model: 'Test unit',
+      vehicleType: 'commuter_van',
+      assignedDriver: null,
+      currentKm: 1000,
+      lastPmsKm: 0,
+      status: 'active',
+      repairSpend: 1000,
+      pmsSpend: 4500,
+      workOrderCount: 20,
+      pmsCompletedCount: 10,
+      department: 'Fleet Operations',
+    };
+    const currentMonth = new Date();
+    currentMonth.setDate(1);
+    currentMonth.setHours(0, 0, 0, 0);
+    const monthKey = `${currentMonth.getFullYear()}-${String(
+      currentMonth.getMonth() + 1,
+    ).padStart(2, '0')}`;
+
+    const summary = computeFleetTcoAnalysis(
+      [vehicle],
+      [{ date: currentMonth, amount: 5500, isPms: false }],
+      new Map([[monthKey, 30]]),
+    );
+
+    expect(
+      summary.monthlyTrend.find((month) => month.monthKey === monthKey),
+    ).toMatchObject({
+      repairSpend: 5500,
+      pmsSpend: 0,
+      workOrderCount: 30,
+    });
+  });
 });
 
 describe('Fleet Analytics REST API Integration', () => {

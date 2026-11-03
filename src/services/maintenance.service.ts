@@ -1,4 +1,4 @@
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc, ne } from 'drizzle-orm';
 import { db } from '../db/connection.js';
 import {
   pmsRecords,
@@ -8,9 +8,36 @@ import {
   purchaseRequisitions,
 } from '../db/schema.js';
 import { isPmsOverdue } from '../domain/pms.js';
-import { validateRepairApproval } from '../domain/repair.js';
 import { assertPrApproved } from '../domain/prGating.js';
 import { logger } from '../config/logger.js';
+import type { OffsetPage } from '../routes/pagination.js';
+import type { AuthUser } from '../auth/abilities.js';
+import type { PurchaseRequisitionScope } from '../auth/scope.js';
+import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
+import { purchaseRequisitionScopeCondition } from './procurement.service.js';
+import { nextDocumentNumber } from '../db/document-numbers.js';
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** A PR funds exactly one repair work order; reuse would let one approval unlock many repairs. */
+async function assertPrNotLinkedElsewhere(
+  executor: Transaction | typeof db,
+  prId: string,
+  workOrderId?: string,
+): Promise<void> {
+  const [other] = await executor
+    .select({ id: repairWorkOrders.id })
+    .from(repairWorkOrders)
+    .where(
+      workOrderId
+        ? and(eq(repairWorkOrders.linkedPrId, prId), ne(repairWorkOrders.id, workOrderId))
+        : eq(repairWorkOrders.linkedPrId, prId),
+    )
+    .limit(1);
+  if (other) {
+    throw new ConflictError('Purchase requisition is already linked to another work order.');
+  }
+}
 
 export class MaintenanceService {
   // ----------------------------------------------------
@@ -32,7 +59,7 @@ export class MaintenanceService {
 
   static async completePmsOrder(pmsId: string, actualKm: number) {
     const [pms] = await db.select().from(pmsRecords).where(eq(pmsRecords.id, pmsId));
-    if (!pms) throw new Error(`PMS record ${pmsId} not found`);
+    if (!pms) throw new NotFoundError('PMS record not found.');
 
     const [updatedPms] = await db
       .update(pmsRecords)
@@ -61,15 +88,23 @@ export class MaintenanceService {
     return updatedPms;
   }
 
-  static async listPmsRecords(vehicleId?: string) {
-    if (vehicleId) {
-      return db
+  static async listPmsRecords(vehicleId: string | undefined, page: OffsetPage) {
+    const rows = await (vehicleId
+      ? db
         .select()
         .from(pmsRecords)
         .where(eq(pmsRecords.vehicleId, vehicleId))
-        .orderBy(desc(pmsRecords.createdAt));
-    }
-    return db.select().from(pmsRecords).orderBy(desc(pmsRecords.createdAt));
+        .orderBy(desc(pmsRecords.createdAt), desc(pmsRecords.id))
+      : db
+          .select()
+          .from(pmsRecords)
+          .orderBy(desc(pmsRecords.createdAt), desc(pmsRecords.id)))
+      .limit(page.limit + 1)
+      .offset(page.offset);
+    return {
+      items: rows.slice(0, page.limit),
+      hasMore: rows.length > page.limit,
+    };
   }
 
   // ----------------------------------------------------
@@ -81,7 +116,16 @@ export class MaintenanceService {
     linkedPrId?: string;
   }) {
     const [vehicle] = await db.select().from(vehicles).where(eq(vehicles.id, data.vehicleId));
-    if (!vehicle) throw new Error(`Vehicle ${data.vehicleId} not found`);
+    if (!vehicle) throw new NotFoundError('Vehicle not found.');
+
+    if (data.linkedPrId) {
+      const [pr] = await db
+        .select({ id: purchaseRequisitions.id })
+        .from(purchaseRequisitions)
+        .where(eq(purchaseRequisitions.id, data.linkedPrId));
+      if (!pr) throw new ValidationError('Linked purchase requisition does not exist.');
+      await assertPrNotLinkedElsewhere(db, data.linkedPrId);
+    }
 
     // Check if vehicle has any skipped PMS
     const pastPms = await db
@@ -99,8 +143,7 @@ export class MaintenanceService {
 
     const isPmsCompliant = !isOverdue && !wasPmsSkipped;
 
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const workOrderNumber = `WO-${new Date().getFullYear()}-${randomSuffix}`;
+    const workOrderNumber = await nextDocumentNumber('WO');
 
     const [order] = await db
       .insert(repairWorkOrders)
@@ -140,8 +183,17 @@ export class MaintenanceService {
     };
   }
 
-  static async listRepairWorkOrders() {
-    return db.select().from(repairWorkOrders).orderBy(desc(repairWorkOrders.createdAt));
+  static async listRepairWorkOrders(page: OffsetPage) {
+    const rows = await db
+      .select()
+      .from(repairWorkOrders)
+      .orderBy(desc(repairWorkOrders.createdAt), desc(repairWorkOrders.id))
+      .limit(page.limit + 1)
+      .offset(page.offset);
+    return {
+      items: rows.slice(0, page.limit),
+      hasMore: rows.length > page.limit,
+    };
   }
 
   static async getRepairWorkOrderById(id: string) {
@@ -152,81 +204,149 @@ export class MaintenanceService {
   // ----------------------------------------------------
   // Incident Report Operations (Mandatory for skipped PMS)
   // ----------------------------------------------------
-  static async fileIncidentReport(data: {
-    vehicleId: string;
-    repairWorkOrderId: string;
-    reportedBy: string;
-    incidentDate: string | Date;
-    reason: string;
-    damagesDescription: string;
-    preventativeAction?: string;
-  }) {
-    const [incident] = await db
-      .insert(incidentReports)
-      .values({
-        vehicleId: data.vehicleId,
-        repairWorkOrderId: data.repairWorkOrderId,
-        reportedBy: data.reportedBy,
-        incidentDate: new Date(data.incidentDate),
-        reason: data.reason,
-        damagesDescription: data.damagesDescription,
-        preventativeAction: data.preventativeAction || null,
-      })
-      .returning();
+  /**
+   * Files the incident report and flags the work order in one transaction.
+   * The reporter is the authenticated user, and the work order must belong to
+   * the stated vehicle and still be pending.
+   */
+  static async fileIncidentReport(
+    data: {
+      vehicleId: string;
+      repairWorkOrderId: string;
+      incidentDate: Date;
+      reason: string;
+      damagesDescription: string;
+      preventativeAction?: string;
+    },
+    reporter: AuthUser,
+  ) {
+    return db.transaction(async (tx) => {
+      const [order] = await tx
+        .select({
+          id: repairWorkOrders.id,
+          vehicleId: repairWorkOrders.vehicleId,
+          status: repairWorkOrders.status,
+          incidentReportFiled: repairWorkOrders.incidentReportFiled,
+        })
+        .from(repairWorkOrders)
+        .where(eq(repairWorkOrders.id, data.repairWorkOrderId))
+        .for('update');
 
-    // Automatically set incidentReportFiled to TRUE on the repair work order
-    await db
-      .update(repairWorkOrders)
-      .set({ incidentReportFiled: true })
-      .where(eq(repairWorkOrders.id, data.repairWorkOrderId));
+      if (!order) throw new NotFoundError('Repair work order not found.');
+      if (order.vehicleId !== data.vehicleId) {
+        throw new ValidationError('The repair work order does not belong to the specified vehicle.');
+      }
+      if (order.incidentReportFiled) {
+        throw new ConflictError('An incident report has already been filed for this work order.');
+      }
+      if (order.status !== 'pending') {
+        throw new ConflictError(
+          `Incident reports can only be filed for pending work orders; this one is ${order.status}.`,
+        );
+      }
 
-    logger.info(
-      { incidentId: incident.id, workOrderId: data.repairWorkOrderId },
-      '[MaintenanceService] Mandatory Incident Report filed & unlocked for repair audit',
-    );
+      const [incident] = await tx
+        .insert(incidentReports)
+        .values({
+          vehicleId: data.vehicleId,
+          repairWorkOrderId: data.repairWorkOrderId,
+          reportedBy: reporter.name,
+          incidentDate: data.incidentDate,
+          reason: data.reason,
+          damagesDescription: data.damagesDescription,
+          preventativeAction: data.preventativeAction || null,
+        })
+        .returning();
 
-    return incident;
+      await tx
+        .update(repairWorkOrders)
+        .set({ incidentReportFiled: true })
+        .where(eq(repairWorkOrders.id, data.repairWorkOrderId));
+
+      logger.info(
+        { incidentId: incident.id, workOrderId: data.repairWorkOrderId, reporterId: reporter.id },
+        '[MaintenanceService] Mandatory Incident Report filed',
+      );
+
+      return incident;
+    });
   }
 
   // ----------------------------------------------------
   // PR Gatekeeper Unlock
   // ----------------------------------------------------
-  static async unlockWorkOrderWithPr(workOrderId: string, prId?: string) {
-    const order = await this.getRepairWorkOrderById(workOrderId);
-    if (!order) throw new Error(`Work order ${workOrderId} not found`);
+  /**
+   * Unlocks a pending work order using its own linked PR. A caller-supplied PR
+   * is accepted only when it matches the existing link, or when the order has
+   * no link yet and the PR is in the caller's scope and unused elsewhere.
+   * Rows are locked so concurrent unlocks cannot reuse a PR or double-apply.
+   */
+  static async unlockWorkOrderWithPr(
+    workOrderId: string,
+    requestedPrId: string | undefined,
+    scope: PurchaseRequisitionScope,
+  ) {
+    return db.transaction(async (tx) => {
+      const [order] = await tx
+        .select()
+        .from(repairWorkOrders)
+        .where(eq(repairWorkOrders.id, workOrderId))
+        .for('update');
+      if (!order) throw new NotFoundError('Work order not found.');
 
-    const effectivePrId = prId || order.linkedPrId;
-    if (!effectivePrId) {
-      throw new Error('Cannot unlock work order: No Purchase Requisition linked.');
-    }
+      if (requestedPrId && order.linkedPrId && requestedPrId !== order.linkedPrId) {
+        throw new ConflictError('Work order is linked to a different purchase requisition.');
+      }
+      const effectivePrId = order.linkedPrId ?? requestedPrId;
+      if (!effectivePrId) {
+        throw new ValidationError('Cannot unlock work order: No Purchase Requisition linked.');
+      }
 
-    const [pr] = await db
-      .select()
-      .from(purchaseRequisitions)
-      .where(eq(purchaseRequisitions.id, effectivePrId));
+      if (order.status === 'approved' && order.linkedPrId === effectivePrId) {
+        return order;
+      }
+      if (order.status !== 'pending') {
+        throw new ConflictError(`Work order is ${order.status} and cannot be unlocked.`);
+      }
 
-    if (!pr) {
-      throw new Error(`Linked Purchase Requisition ${effectivePrId} not found.`);
-    }
+      const [pr] = await tx
+        .select({
+          id: purchaseRequisitions.id,
+          prNumber: purchaseRequisitions.prNumber,
+          status: purchaseRequisitions.status,
+        })
+        .from(purchaseRequisitions)
+        .where(
+          and(
+            eq(purchaseRequisitions.id, effectivePrId),
+            purchaseRequisitionScopeCondition(scope),
+          ),
+        )
+        .for('update');
+      if (!pr) throw new NotFoundError('Linked purchase requisition not found.');
 
-    // Reference Domain Rule 4: Centralized PR Gatekeeper check
-    assertPrApproved(pr.status);
+      await assertPrNotLinkedElsewhere(tx, effectivePrId, workOrderId);
 
-    const [unlocked] = await db
-      .update(repairWorkOrders)
-      .set({
-        linkedPrId: effectivePrId,
-        status: 'approved',
-        procurementFulfillmentStatus: 'pr_approved',
-      })
-      .where(eq(repairWorkOrders.id, workOrderId))
-      .returning();
+      // Reference Domain Rule 4: Centralized PR Gatekeeper check
+      assertPrApproved(pr.status);
 
-    logger.info(
-      { workOrderId, prNumber: pr.prNumber },
-      '[MaintenanceService] Work order successfully unlocked via approved PR Gatekeeper',
-    );
+      const [unlocked] = await tx
+        .update(repairWorkOrders)
+        .set({
+          linkedPrId: effectivePrId,
+          status: 'approved',
+          procurementFulfillmentStatus: 'pr_approved',
+        })
+        .where(and(eq(repairWorkOrders.id, workOrderId), eq(repairWorkOrders.status, 'pending')))
+        .returning();
+      if (!unlocked) throw new ConflictError('Work order changed while it was being unlocked.');
 
-    return unlocked;
+      logger.info(
+        { workOrderId, prNumber: pr.prNumber },
+        '[MaintenanceService] Work order successfully unlocked via approved PR Gatekeeper',
+      );
+
+      return unlocked;
+    });
   }
 }

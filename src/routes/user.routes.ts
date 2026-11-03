@@ -3,6 +3,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { users, localCredentials } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError } from "../http/errors.js";
 
 export const userRouter = Router();
 
@@ -18,8 +19,7 @@ userRouter.get(
         .orderBy(asc(users.name));
       res.json(list);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -34,8 +34,7 @@ userRouter.get("/", async (_req: Request, res: Response) => {
     const localUsers = new Set(credentials.map((credential) => credential.userId));
     res.json(list.map((user) => ({ ...user, hasLocalPassword: localUsers.has(user.id) })));
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });
 
@@ -62,8 +61,7 @@ userRouter.post("/", async (req: Request, res: Response) => {
 
     res.status(201).json(created);
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(400).json({ error: error.message });
+    sendError(res, err);
   }
 });
 
@@ -91,8 +89,7 @@ userRouter.put("/:id", async (req: Request, res: Response) => {
 
     res.json(updated);
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(400).json({ error: error.message });
+    sendError(res, err);
   }
 });
 
@@ -105,7 +102,6 @@ userRouter.delete("/:id", async (req: Request, res: Response) => {
       id: String(req.params.id),
     });
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });

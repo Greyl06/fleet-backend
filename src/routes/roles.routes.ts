@@ -5,6 +5,7 @@ import { mapInternalRole, type Role } from "../auth/abilities.js";
 import { defaultLandingPages, effectiveLandingPage, permittedLandingPages, roleRedirectInput } from "../domain/role-navigation.js";
 import { resolveLandingPage } from "../services/role-navigation.service.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError } from "../http/errors.js";
 
 export const rolesRouter = Router();
 
@@ -73,8 +74,7 @@ rolesRouter.get("/", async (_req: Request, res: Response) => {
 
     res.json(rolesWithPermissions);
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });
 
@@ -84,8 +84,7 @@ rolesRouter.get("/permissions", async (_req: Request, res: Response) => {
     const allPerms = await db.select().from(permissions);
     res.json(allPerms);
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });
 

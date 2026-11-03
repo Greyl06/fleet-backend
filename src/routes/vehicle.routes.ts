@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { VehicleService } from "../services/vehicle.service.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError } from "../http/errors.js";
 
 export const vehicleRouter = Router();
 
@@ -13,8 +14,7 @@ vehicleRouter.get(
       const list = await VehicleService.listVehicles();
       res.json(list);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -34,8 +34,7 @@ vehicleRouter.get(
       }
       res.json(vehicle);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -72,8 +71,7 @@ vehicleRouter.post(
 
       res.status(201).json(vehicle);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -96,8 +94,7 @@ vehicleRouter.post(
       );
       res.json(updated);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );

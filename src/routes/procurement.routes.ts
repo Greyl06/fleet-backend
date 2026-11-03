@@ -5,7 +5,11 @@ import {
   WorkOrderNotFoundError,
 } from "../services/procurement.service.js";
 import { rateLimitProcurementWrite } from "../middleware/arcjet.js";
-import { requirePermission } from "../middleware/auth.js";
+import { currentUser, requirePermission } from "../middleware/auth.js";
+import { purchaseRequisitionScope } from "../auth/scope.js";
+import { NotFoundError, sendError } from "../http/errors.js";
+import { requireUuid } from "../http/validation.js";
+import { parseOffsetPage, setPaginationHeaders } from "./pagination.js";
 
 export const procurementRouter = Router();
 
@@ -29,8 +33,7 @@ procurementRouter.post(
       });
       res.status(201).json(pr);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -41,11 +44,19 @@ procurementRouter.get(
   requirePermission("read", "PurchaseRequisition"),
   async (req: Request, res: Response) => {
     try {
-      const list = await ProcurementService.listPrs();
-      res.json(list);
+      const page = parseOffsetPage(req.query);
+      if (!page) {
+        res.status(400).json({ error: "Invalid pagination. Use limit 1-500 and offset 0-100000." });
+        return;
+      }
+      const result = await ProcurementService.listPrs(
+        page,
+        purchaseRequisitionScope(req.user),
+      );
+      setPaginationHeaders(res, page, result.hasMore);
+      res.json(result.items);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -56,36 +67,33 @@ procurementRouter.get(
   requirePermission("read", "PurchaseRequisition"),
   async (req: Request, res: Response) => {
     try {
-      const pr = await ProcurementService.getPrById(String(req.params.id));
-      if (!pr) {
-        res.status(404).json({ error: "PR not found" });
-        return;
-      }
+      const pr = await ProcurementService.getPrById(
+        requireUuid(req.params.id, "PR id"),
+        purchaseRequisitionScope(req.user),
+      );
+      if (!pr) throw new NotFoundError("Purchase requisition not found.");
       res.json(pr);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
 
-// Approve PR (Gated Spend - Protected by Arcjet rate limiting & Finance approval permission)
+// Approve PR. The approver identity always comes from the authenticated session.
 procurementRouter.patch(
   "/pr/:id/approve",
   rateLimitProcurementWrite,
   requirePermission("approve", "PurchaseRequisition"),
   async (req: Request, res: Response) => {
     try {
-      const approverName =
-        req.user?.name || req.body.approverName || "Finance Manager";
       const approved = await ProcurementService.approvePr(
-        String(req.params.id),
-        approverName,
+        requireUuid(req.params.id, "PR id"),
+        currentUser(req),
+        purchaseRequisitionScope(req.user),
       );
       res.json(approved);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -96,11 +104,16 @@ procurementRouter.get(
   requirePermission("read", "RepairWorkOrder"),
   async (req: Request, res: Response) => {
     try {
-      const orders = await ProcurementService.listProcurementWorkOrders();
-      res.json(orders);
+      const page = parseOffsetPage(req.query);
+      if (!page) {
+        res.status(400).json({ error: "Invalid pagination. Use limit 1-500 and offset 0-100000." });
+        return;
+      }
+      const result = await ProcurementService.listProcurementWorkOrders(page);
+      setPaginationHeaders(res, page, result.hasMore);
+      res.json(result.items);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -126,27 +139,26 @@ procurementRouter.patch(
       }
 
       const updated = await ProcurementService.updateFulfillmentStatus(
-        String(req.params.id),
+        requireUuid(req.params.id, "Work order id"),
         status,
         notes,
       );
       res.json(updated);
     } catch (err: unknown) {
-      const error = err as Error;
-      if (error instanceof WorkOrderNotFoundError) {
+      if (err instanceof WorkOrderNotFoundError) {
         res
           .status(404)
-          .json({ error: "Work order not found", message: error.message });
+          .json({ error: "Work order not found", message: err.message });
         return;
       }
-      if (error instanceof InvalidFulfillmentTransitionError) {
+      if (err instanceof InvalidFulfillmentTransitionError) {
         res.status(409).json({
           error: "Invalid fulfillment transition",
-          message: error.message,
+          message: err.message,
         });
         return;
       }
-      res.status(500).json({ error: "Failed to update fulfillment status" });
+      sendError(res, err);
     }
   },
 );

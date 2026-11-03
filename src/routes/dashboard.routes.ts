@@ -8,6 +8,7 @@ import {
   activityLogs,
   formSubmissions,
 } from "../db/schema.js";
+import { sendError } from "../http/errors.js";
 
 export const dashboardRouter = Router();
 
@@ -117,7 +118,6 @@ dashboardRouter.get("/stats", async (req: Request, res: Response) => {
       recentActivity,
     });
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });

@@ -118,6 +118,7 @@ export function evaluateCostRating(
 export function computeFleetTcoAnalysis(
   vehicleDataList: VehicleCostData[],
   monthlyEvents: { date: Date; amount: number; isPms: boolean }[] = [],
+  monthlyEventCounts?: Map<string, number>,
 ): FleetTcoSummary {
   const totalVehicles = vehicleDataList.length;
   const activeVehicles = vehicleDataList.filter((v) => v.status === 'active').length;
@@ -232,6 +233,12 @@ export function computeFleetTcoAnalysis(
         entry.repair += evt.amount;
       }
       entry.count += 1;
+    }
+  }
+  if (monthlyEventCounts) {
+    for (const [monthKey, count] of monthlyEventCounts) {
+      const entry = monthlyMap.get(monthKey);
+      if (entry) entry.count = count;
     }
   }
 

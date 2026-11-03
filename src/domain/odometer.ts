@@ -1,4 +1,5 @@
 import { isPmsOverdue } from "./pms.js";
+import { ValidationError } from "../http/errors.js";
 
 export type VehicleOperationalStatus =
   | "active"
@@ -18,9 +19,9 @@ export function calculateOdometerUpdate(
   endingKm: number,
 ): Pick<OdometerVehicleState, "currentKm" | "status"> {
   if (!Number.isSafeInteger(endingKm) || endingKm < 0)
-    throw new Error("Ending KM must be a non-negative whole number.");
+    throw new ValidationError("Ending KM must be a non-negative whole number.");
   if (endingKm < vehicle.currentKm) {
-    throw new Error(
+    throw new ValidationError(
       `Ending KM (${endingKm}) cannot be less than current odometer reading (${vehicle.currentKm})`,
     );
   }

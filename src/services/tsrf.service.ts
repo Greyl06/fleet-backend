@@ -5,6 +5,8 @@ import { mapInternalRole } from "../auth/abilities.js";
 import { evaluateTsrfSubmissionTime } from "../domain/tsrf.js";
 import { VehicleService } from "./vehicle.service.js";
 import { logger } from "../config/logger.js";
+import { NotFoundError, ValidationError } from "../http/errors.js";
+import { nextDocumentNumber } from "../db/document-numbers.js";
 
 export interface CreateTsrfInput {
   department: string;
@@ -49,7 +51,7 @@ export class TsrfService {
         and(eq(lovLists.code, "DEPARTMENTS"), eq(lovLists.status, "active")),
       );
     if (!departmentList)
-      throw new Error("Department reference data is not configured.");
+      throw new ValidationError("Department reference data is not configured.");
     const now = new Date();
     const [department] = await db
       .select()
@@ -67,9 +69,9 @@ export class TsrfService {
         ),
       );
     if (!department)
-      throw new Error("Select an active department from the Department list.");
+      throw new ValidationError("Select an active department from the Department list.");
     if (!department.approvalUserId)
-      throw new Error(
+      throw new ValidationError(
         "The selected department has no assigned approver. Contact the Fleet administrator.",
       );
     const [departmentHead] = await db
@@ -88,7 +90,7 @@ export class TsrfService {
       !departmentHead ||
       (departmentHeadRole !== "approver" && departmentHeadRole !== "admin")
     ) {
-      throw new Error(
+      throw new ValidationError(
         "The selected department approver is no longer active or eligible. Contact the Fleet administrator.",
       );
     }
@@ -96,8 +98,7 @@ export class TsrfService {
     const submissionDate = input.submissionDate ?? now;
     const cutoffEval = evaluateTsrfSubmissionTime(submissionDate);
 
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const requestNumber = `TSRF-${new Date().getFullYear()}-${randomSuffix}`;
+    const requestNumber = await nextDocumentNumber("TSRF");
 
     const [created] = await db
       .insert(tsrfRequests)
@@ -173,7 +174,7 @@ export class TsrfService {
     action: "approve" | "reject",
   ) {
     const tsrf = await this.getTsrfById(id);
-    if (!tsrf) throw new Error(`TSRF with ID ${id} not found`);
+    if (!tsrf) throw new NotFoundError("TSRF request not found.");
 
     if (action === "reject") {
       const [updated] = await db
@@ -223,7 +224,7 @@ export class TsrfService {
     input: { endingKm: number; assignedVehicleId?: string },
   ) {
     const tsrf = await this.getTsrfById(id);
-    if (!tsrf) throw new Error(`TSRF with ID ${id} not found`);
+    if (!tsrf) throw new NotFoundError("TSRF request not found.");
 
     const vehicleId = input.assignedVehicleId || tsrf.assignedVehicleId;
     let updatedVehicle = null;

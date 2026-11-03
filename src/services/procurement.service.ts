@@ -1,4 +1,4 @@
-import { and, eq, desc, inArray } from "drizzle-orm";
+import { and, eq, desc, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import {
   purchaseRequisitions,
@@ -6,6 +6,19 @@ import {
   vehicles,
 } from "../db/schema.js";
 import { logger } from "../config/logger.js";
+import type { OffsetPage } from "../routes/pagination.js";
+import type { AuthUser } from "../auth/abilities.js";
+import type { PurchaseRequisitionScope } from "../auth/scope.js";
+import { ConflictError, NotFoundError } from "../http/errors.js";
+import { nextDocumentNumber } from "../db/document-numbers.js";
+
+export function purchaseRequisitionScopeCondition(
+  scope: PurchaseRequisitionScope,
+): SQL | undefined {
+  if (scope.kind === "all") return undefined;
+  if (scope.kind === "none") return sql`false`;
+  return sql`lower(btrim(${purchaseRequisitions.department})) = ${scope.department}`;
+}
 
 export class WorkOrderNotFoundError extends Error {
   constructor(workOrderId: string) {
@@ -32,8 +45,7 @@ export class ProcurementService {
     purpose: string;
     amount?: number;
   }) {
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const prNumber = `PR-${new Date().getFullYear()}-${randomSuffix}`;
+    const prNumber = await nextDocumentNumber("PR");
 
     const [pr] = await db
       .insert(purchaseRequisitions)
@@ -53,37 +65,71 @@ export class ProcurementService {
     return pr;
   }
 
-  static async listPrs() {
-    return db
+  static async listPrs(page: OffsetPage, scope: PurchaseRequisitionScope) {
+    const rows = await db
       .select()
       .from(purchaseRequisitions)
-      .orderBy(desc(purchaseRequisitions.createdAt));
+      .where(purchaseRequisitionScopeCondition(scope))
+      .orderBy(desc(purchaseRequisitions.createdAt), desc(purchaseRequisitions.id))
+      .limit(page.limit + 1)
+      .offset(page.offset);
+    return {
+      items: rows.slice(0, page.limit),
+      hasMore: rows.length > page.limit,
+    };
   }
 
-  static async getPrById(id: string) {
+  static async getPrById(id: string, scope: PurchaseRequisitionScope) {
     const [pr] = await db
       .select()
       .from(purchaseRequisitions)
-      .where(eq(purchaseRequisitions.id, id));
+      .where(
+        and(
+          eq(purchaseRequisitions.id, id),
+          purchaseRequisitionScopeCondition(scope),
+        ),
+      );
     return pr || null;
   }
 
-  static async approvePr(id: string, approverName = "Finance Manager") {
+  /**
+   * Approves a PR only while it is still pending and inside the approver's
+   * scope. The status guard lives in the UPDATE itself, so concurrent or
+   * replayed approvals cannot overwrite an earlier decision.
+   */
+  static async approvePr(
+    id: string,
+    approver: AuthUser,
+    scope: PurchaseRequisitionScope,
+  ) {
     const [updated] = await db
       .update(purchaseRequisitions)
       .set({
         status: "approved",
-        approvedBy: approverName,
+        approvedBy: approver.name,
         approvedAt: new Date(),
       })
-      .where(eq(purchaseRequisitions.id, id))
+      .where(
+        and(
+          eq(purchaseRequisitions.id, id),
+          eq(purchaseRequisitions.status, "pending"),
+          purchaseRequisitionScopeCondition(scope),
+        ),
+      )
       .returning();
 
-    if (!updated) throw new Error(`PR ${id} not found`);
+    if (!updated) {
+      // Out-of-scope PRs are reported as missing so their existence is not disclosed.
+      const existing = await this.getPrById(id, scope);
+      if (!existing) throw new NotFoundError("Purchase requisition not found.");
+      throw new ConflictError(
+        `Purchase requisition ${existing.prNumber} is ${existing.status} and can no longer be approved.`,
+      );
+    }
 
     logger.info(
-      { prId: id, approverName },
-      "[ProcurementService] PR approved by Finance",
+      { prId: id, approverId: approver.id, approverRole: approver.role },
+      "[ProcurementService] PR approved",
     );
     return updated;
   }
@@ -91,8 +137,8 @@ export class ProcurementService {
   // ----------------------------------------------------
   // Procurement Order Fulfillment
   // ----------------------------------------------------
-  static async listProcurementWorkOrders() {
-    return db
+  static async listProcurementWorkOrders(page: OffsetPage) {
+    const rows = await db
       .select()
       .from(repairWorkOrders)
       .where(
@@ -103,7 +149,13 @@ export class ProcurementService {
           "vehicle_operational",
         ]),
       )
-      .orderBy(desc(repairWorkOrders.createdAt));
+      .orderBy(desc(repairWorkOrders.createdAt), desc(repairWorkOrders.id))
+      .limit(page.limit + 1)
+      .offset(page.offset);
+    return {
+      items: rows.slice(0, page.limit),
+      hasMore: rows.length > page.limit,
+    };
   }
 
   static async updateFulfillmentStatus(

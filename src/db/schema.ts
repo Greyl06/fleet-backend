@@ -6,6 +6,7 @@ import {
   boolean,
   uuid,
   index,
+  primaryKey,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
@@ -44,22 +45,44 @@ export const vehicles = pgTable("vehicles", {
 // ----------------------------------------------------
 // Purchase Requisitions (Module C - PR Gatekeeper)
 // ----------------------------------------------------
-export const purchaseRequisitions = pgTable("purchase_requisitions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  prNumber: text("pr_number").notNull().unique(),
-  department: text("department").notNull(),
-  amount: integer("amount").notNull().default(0),
-  status: text("status", {
-    enum: ["draft", "pending", "approved", "rejected"],
-  })
-    .notNull()
-    .default("draft"),
-  purpose: text("purpose").notNull(),
-  approvedBy: text("approved_by"),
-  approvedAt: timestamp("approved_at"),
-  procurementNotes: text("procurement_notes"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const purchaseRequisitions = pgTable(
+  "purchase_requisitions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    prNumber: text("pr_number").notNull().unique(),
+    department: text("department").notNull(),
+    amount: integer("amount").notNull().default(0),
+    status: text("status", {
+      enum: ["draft", "pending", "approved", "rejected"],
+    })
+      .notNull()
+      .default("draft"),
+    purpose: text("purpose").notNull(),
+    approvedBy: text("approved_by"),
+    approvedAt: timestamp("approved_at"),
+    procurementNotes: text("procurement_notes"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("purchase_requisitions_created_idx").on(
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+// ----------------------------------------------------
+// Document number counters (PR / WO / TSRF numbering per year)
+// ----------------------------------------------------
+export const documentCounters = pgTable(
+  "document_counters",
+  {
+    prefix: text("prefix").notNull(),
+    year: integer("year").notNull(),
+    lastValue: integer("last_value").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.prefix, table.year] })],
+);
 
 // ----------------------------------------------------
 // PMS Records (Module B - 5,000 KM Tracking)
@@ -81,7 +104,16 @@ export const pmsRecords = pgTable(
     completedAt: timestamp("completed_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
-  (table) => [index("idx_pms_records_vehicle").on(table.vehicleId)],
+  (table) => [
+    index("idx_pms_records_vehicle").on(table.vehicleId),
+    index("pms_records_vehicle_created_idx").on(
+      table.vehicleId,
+      table.createdAt,
+      table.id,
+    ),
+    index("pms_records_created_idx").on(table.createdAt, table.id),
+    index("pms_records_completed_at_idx").on(table.completedAt),
+  ],
 );
 
 // ----------------------------------------------------
@@ -122,6 +154,17 @@ export const repairWorkOrders = pgTable(
   (table) => [
     index("idx_repair_work_orders_vehicle").on(table.vehicleId),
     index("idx_repair_work_orders_pr").on(table.linkedPrId),
+    index("repair_work_orders_vehicle_created_idx").on(
+      table.vehicleId,
+      table.createdAt,
+      table.id,
+    ),
+    index("repair_work_orders_created_idx").on(table.createdAt, table.id),
+    index("repair_work_orders_procurement_created_idx").on(
+      table.procurementFulfillmentStatus,
+      table.createdAt,
+      table.id,
+    ),
   ],
 );
 
@@ -214,6 +257,12 @@ export const tsrfRequests = pgTable(
   (table) => [
     index("idx_tsrf_requests_assigned_vehicle").on(table.assignedVehicleId),
     index("idx_tsrf_requests_dept_head").on(table.departmentHeadUserId),
+    index("tsrf_requests_created_idx").on(table.createdAt, table.id),
+    index("tsrf_requests_assigned_created_idx").on(
+      table.assignedVehicleId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
   ],
 );
 
@@ -293,6 +342,7 @@ export const authIdentities = pgTable(
       table.issuer,
       table.subject,
     ),
+    index("auth_identities_user_id_idx").on(table.userId),
   ],
 );
 
@@ -306,57 +356,88 @@ export const localCredentials = pgTable("local_credentials", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const authSessions = pgTable("auth_sessions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  tokenHash: text("token_hash").notNull().unique(),
-  csrfTokenHash: text("csrf_token_hash").notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  lastUsedAt: timestamp("last_used_at").defaultNow().notNull(),
-  expiresAt: timestamp("expires_at").notNull(),
-  revokedAt: timestamp("revoked_at"),
-});
+export const authSessions = pgTable(
+  "auth_sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    csrfTokenHash: text("csrf_token_hash").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    lastUsedAt: timestamp("last_used_at").defaultNow().notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    revokedAt: timestamp("revoked_at"),
+  },
+  (table) => [
+    index("auth_sessions_user_expiry_idx").on(table.userId, table.expiresAt),
+    index("auth_sessions_expiry_retention_idx").on(table.expiresAt),
+    index("auth_sessions_revoked_retention_idx").on(table.revokedAt),
+  ],
+);
 
-export const passwordResetTokens = pgTable("password_reset_tokens", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  tokenHash: text("token_hash").notNull().unique(),
-  expiresAt: timestamp("expires_at").notNull(),
-  consumedAt: timestamp("consumed_at"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at").notNull(),
+    consumedAt: timestamp("consumed_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("password_reset_tokens_expiry_retention_idx").on(table.expiresAt),
+    index("password_reset_tokens_consumed_retention_idx").on(
+      table.consumedAt,
+    ),
+  ],
+);
 
-export const authSignupRequests = pgTable("auth_signup_requests", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  department: text("department").notNull(),
-  departmentCode: text("department_code").notNull().default(""),
-  requestedRole: text("requested_role"),
-  passwordHash: text("password_hash"),
-  verificationTokenHash: text("verification_token_hash"),
-  verificationExpiresAt: timestamp("verification_expires_at").notNull(),
-  emailVerifiedAt: timestamp("email_verified_at"),
-  status: text("status", {
-    enum: ["pending_verification", "pending_approval", "approved", "rejected"],
-  })
-    .notNull()
-    .default("pending_verification"),
-  assignedRole: text("assigned_role"),
-  linkedUserId: uuid("linked_user_id").references(() => users.id, {
-    onDelete: "set null",
-  }),
-  reviewedAt: timestamp("reviewed_at"),
-  reviewedById: uuid("reviewed_by_id").references(() => users.id, {
-    onDelete: "set null",
-  }),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+export const authSignupRequests = pgTable(
+  "auth_signup_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull(),
+    email: text("email").notNull().unique(),
+    department: text("department").notNull(),
+    departmentCode: text("department_code").notNull().default(""),
+    requestedRole: text("requested_role"),
+    passwordHash: text("password_hash"),
+    verificationTokenHash: text("verification_token_hash"),
+    verificationExpiresAt: timestamp("verification_expires_at").notNull(),
+    emailVerifiedAt: timestamp("email_verified_at"),
+    status: text("status", {
+      enum: [
+        "pending_verification",
+        "pending_approval",
+        "approved",
+        "rejected",
+      ],
+    })
+      .notNull()
+      .default("pending_verification"),
+    assignedRole: text("assigned_role"),
+    linkedUserId: uuid("linked_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    reviewedAt: timestamp("reviewed_at"),
+    reviewedById: uuid("reviewed_by_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("auth_signup_requests_verification_retention_idx").on(
+      table.status,
+      table.verificationExpiresAt,
+    ),
+  ],
+);
 
 // ----------------------------------------------------
 // Maintenance Reference Data Tables (Dropdowns & Lookups)
@@ -419,7 +500,20 @@ export const activityLogs = pgTable(
     metadataJson: text("metadata_json").notNull().default("{}"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
-  (table) => [index("idx_activity_logs_created_at").on(table.createdAt)],
+  (table) => [
+    index("idx_activity_logs_created_at").on(table.createdAt),
+    index("activity_logs_created_id_idx").on(table.createdAt, table.id),
+    index("activity_logs_module_created_idx").on(
+      table.module,
+      table.createdAt,
+      table.id,
+    ),
+    index("activity_logs_severity_created_idx").on(
+      table.severity,
+      table.createdAt,
+      table.id,
+    ),
+  ],
 );
 
 // ----------------------------------------------------
@@ -512,7 +606,12 @@ export const formVersions = pgTable("form_versions", {
   publishedAt: timestamp("published_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("form_versions_definition_version_idx").on(
+    table.formDefinitionId,
+    table.version,
+  ),
+]);
 
 export const formVersionReadAccessRevisions = pgTable(
   "form_version_read_access_revisions",

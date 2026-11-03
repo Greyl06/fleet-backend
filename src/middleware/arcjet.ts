@@ -46,6 +46,19 @@ export const apiWriteRateLimitAj = arcjetKey
     })
   : null;
 
+export const apiTrafficRateLimitAj = arcjetKey
+  ? arcjet({
+      key: arcjetKey,
+      rules: [
+        fixedWindow({
+          mode: isProduction ? "LIVE" : "DRY_RUN",
+          max: config.apiRequestsPerMinute,
+          window: "1m",
+        }),
+      ],
+    })
+  : null;
+
 export const tsrfBotDetectionAj = arcjetKey
   ? arcjet({
       key: arcjetKey,
@@ -274,6 +287,36 @@ export async function rateLimitApiWrite(
     )
   )
     next();
+}
+
+export async function rateLimitApiTraffic(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (
+    req.path === "/metrics" ||
+    req.path === "/health" ||
+    req.path === "/ready" ||
+    req.path === "/health/live" ||
+    req.path === "/health/ready" ||
+    req.path === "/api/health"
+  ) {
+    next();
+    return;
+  }
+  if (
+    await checkArcjet(
+      req,
+      res,
+      apiTrafficRateLimitAj,
+      "API request rate limit",
+      429,
+      "API request rate limit exceeded. Please retry later.",
+    )
+  ) {
+    next();
+  }
 }
 
 export async function protectTsrfIntake(

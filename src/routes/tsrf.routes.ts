@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { TsrfService } from "../services/tsrf.service.js";
 import { protectTsrfIntake } from "../middleware/arcjet.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError } from "../http/errors.js";
 
 export const tsrfRouter = Router();
 
@@ -61,8 +62,7 @@ tsrfRouter.post(
 
       res.status(201).json(created);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -76,8 +76,7 @@ tsrfRouter.get(
       const list = await TsrfService.listTsrf();
       res.json(list);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -95,8 +94,7 @@ tsrfRouter.get(
       }
       res.json(item);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -160,8 +158,7 @@ tsrfRouter.patch(
       );
       res.json(updated);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
@@ -185,8 +182,7 @@ tsrfRouter.post(
 
       res.json(result);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );

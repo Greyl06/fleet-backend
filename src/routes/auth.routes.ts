@@ -193,8 +193,29 @@ authRouter.get("/me", async (req: Request, res: Response) => {
   }
 });
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 authRouter.post("/local/logout", async (req: Request, res: Response) => {
-  if (req.authSessionId) {
+  let userId = req.user?.id;
+  if ((!userId || !UUID_REGEX.test(userId)) && req.authSessionId) {
+    const [sess] = await db
+      .select({ userId: authSessions.userId })
+      .from(authSessions)
+      .where(eq(authSessions.id, req.authSessionId));
+    if (sess) userId = sess.userId;
+  }
+
+  if (userId && UUID_REGEX.test(userId)) {
+    await db
+      .update(authSessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(authSessions.userId, userId),
+          isNull(authSessions.revokedAt),
+        ),
+      );
+  } else if (req.authSessionId) {
     await db
       .update(authSessions)
       .set({ revokedAt: new Date() })

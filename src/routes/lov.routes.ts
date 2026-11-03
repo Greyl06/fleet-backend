@@ -4,6 +4,7 @@ import { db } from "../db/connection.js";
 import { lovAttributes, lovItems, lovLists, users } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
 import { mapInternalRole } from "../auth/abilities.js";
+import { sendError, ValidationError } from "../http/errors.js";
 
 export const lovRouter = Router();
 lovRouter.use(requirePermission("read", "LovList"));
@@ -27,7 +28,7 @@ function parseOptionalDate(value: unknown, label: string): Date | null {
   if (value === undefined || value === null || value === "") return null;
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime()))
-    throw new Error(`${label} must be a valid date.`);
+    throw new ValidationError(`${label} must be a valid date.`);
   return date;
 }
 
@@ -35,7 +36,7 @@ async function validateItemAttributes(
   listId: string,
   value: unknown,
 ): Promise<Record<string, unknown>> {
-  if (!isRecord(value)) throw new Error("Item attributes must be an object.");
+  if (!isRecord(value)) throw new ValidationError("Item attributes must be an object.");
   const definitions = await db
     .select()
     .from(lovAttributes)
@@ -46,7 +47,7 @@ async function validateItemAttributes(
 
   for (const key of Object.keys(value)) {
     if (!definitionsByKey.has(key))
-      throw new Error(`Attribute "${key}" is not defined for this LOV list.`);
+      throw new ValidationError(`Attribute "${key}" is not defined for this LOV list.`);
   }
 
   definitions.forEach((definition) => {
@@ -56,7 +57,7 @@ async function validateItemAttributes(
     );
     const attributeValue = value[definition.key];
     if (definition.required && !hasValue)
-      throw new Error(`Attribute "${definition.key}" is required.`);
+      throw new ValidationError(`Attribute "${definition.key}" is required.`);
     if (!hasValue) return;
 
     const validType =
@@ -71,7 +72,7 @@ async function validateItemAttributes(
               ? typeof attributeValue === "string"
               : false;
     if (!validType)
-      throw new Error(
+      throw new ValidationError(
         `Attribute "${definition.key}" must be a ${definition.type} value.`,
       );
     if (definition.type === "select") {
@@ -80,7 +81,7 @@ async function validateItemAttributes(
         ? options.map((option) => (isRecord(option) ? option.value : option))
         : [];
       if (!validOptions.includes(attributeValue))
-        throw new Error(`Attribute "${definition.key}" has an invalid option.`);
+        throw new ValidationError(`Attribute "${definition.key}" has an invalid option.`);
     }
   });
   return value;
@@ -94,11 +95,11 @@ async function validateParentItem(
   if (parentId === undefined || parentId === null || parentId === "")
     return null;
   if (typeof parentId !== "string")
-    throw new Error("Parent item ID must be a string.");
+    throw new ValidationError("Parent item ID must be a string.");
   if (!list.supportsHierarchy)
-    throw new Error("This LOV list does not support parent items.");
+    throw new ValidationError("This LOV list does not support parent items.");
   if (parentId === itemId)
-    throw new Error("An LOV item cannot be its own parent.");
+    throw new ValidationError("An LOV item cannot be its own parent.");
 
   const [parent] = await db
     .select({ id: lovItems.id, parentId: lovItems.parentId })
@@ -111,12 +112,12 @@ async function validateParentItem(
       ),
     );
   if (!parent)
-    throw new Error("Parent item must be active and belong to this LOV list.");
+    throw new ValidationError("Parent item must be active and belong to this LOV list.");
 
   let ancestorId = parent.parentId;
   while (ancestorId) {
     if (ancestorId === itemId)
-      throw new Error("Parent assignment would create an LOV hierarchy cycle.");
+      throw new ValidationError("Parent assignment would create an LOV hierarchy cycle.");
     const [ancestor] = await db
       .select({ parentId: lovItems.parentId })
       .from(lovItems)
@@ -137,7 +138,7 @@ async function validateApprovalUser(
   )
     return null;
   if (listCode !== "DEPARTMENTS" || typeof approvalUserId !== "string") {
-    throw new Error(
+    throw new ValidationError(
       "Approval user can only be assigned to a department LOV item.",
     );
   }
@@ -147,7 +148,7 @@ async function validateApprovalUser(
     .where(eq(users.id, approvalUserId));
   const role = user?.status === "active" ? mapInternalRole(user.role) : null;
   if (!user || (role !== "approver" && role !== "admin")) {
-    throw new Error(
+    throw new ValidationError(
       "Department approver must be an active user with the Approver or Administrator role.",
     );
   }
@@ -158,7 +159,7 @@ lovRouter.get("/lists", async (_req: Request, res: Response) => {
   try {
     res.json(await db.select().from(lovLists).orderBy(asc(lovLists.name)));
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    sendError(res, error);
   }
 });
 
@@ -182,7 +183,7 @@ lovRouter.post(
         .returning();
       res.status(201).json(list);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -207,7 +208,7 @@ lovRouter.get("/lists/:code", async (req: Request, res: Response) => {
       })),
     });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    sendError(res, error);
   }
 });
 
@@ -230,7 +231,7 @@ lovRouter.put(
       if (!list) return res.status(404).json({ error: "LOV list not found" });
       res.json(list);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -262,7 +263,7 @@ lovRouter.delete(
         id: list.id,
       });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -320,8 +321,9 @@ lovRouter.post(
           const attrs = await validateItemAttributes(list.id, source.attrs);
           rows.push({ code, label, status: source.status, attrs });
         } catch (error) {
+          if (!(error instanceof ValidationError)) throw error;
           return res.status(400).json({
-            error: `Row ${index + 2}: ${(error as Error).message}`,
+            error: `Row ${index + 2}: ${error.message}`,
           });
         }
       }
@@ -365,7 +367,7 @@ lovRouter.post(
 
       res.json({ imported: items.length, items });
     } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -408,7 +410,7 @@ lovRouter.get("/lists/:code/items", async (req: Request, res: Response) => {
       items.map((item) => ({ ...item, attrs: parseJson(item.attrsJson) })),
     );
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    sendError(res, error);
   }
 });
 
@@ -440,7 +442,7 @@ lovRouter.post(
       const fromDate = parseOptionalDate(effectiveFrom, "Effective from");
       const toDate = parseOptionalDate(effectiveTo, "Effective to");
       if (fromDate && toDate && fromDate > toDate)
-        throw new Error("Effective from must not be after effective to.");
+        throw new ValidationError("Effective from must not be after effective to.");
       const validatedApprovalUserId = await validateApprovalUser(
         list.code,
         approvalUserId,
@@ -462,7 +464,7 @@ lovRouter.post(
         .returning();
       res.status(201).json({ ...item, attrs: parseJson(item.attrsJson) });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -520,7 +522,7 @@ lovRouter.put(
           ? existingItem.effectiveTo
           : parseOptionalDate(effectiveTo, "Effective to");
       if (fromDate && toDate && fromDate > toDate)
-        throw new Error("Effective from must not be after effective to.");
+        throw new ValidationError("Effective from must not be after effective to.");
       const validatedApprovalUserId =
         approvalUserId === undefined
           ? undefined
@@ -547,7 +549,7 @@ lovRouter.put(
       if (!item) return res.status(404).json({ error: "LOV item not found" });
       res.json({ ...item, attrs: parseJson(item.attrsJson) });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -577,7 +579,7 @@ lovRouter.delete(
       if (!item) return res.status(404).json({ error: "LOV item not found" });
       res.json({ ...item, attrs: parseJson(item.attrsJson) });
     } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -603,7 +605,7 @@ lovRouter.get(
         })),
       );
     } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -644,7 +646,7 @@ lovRouter.post(
         .returning();
       res.status(201).json({ ...attribute, options });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -674,7 +676,7 @@ lovRouter.put(
         return res.status(404).json({ error: "LOV attribute not found" });
       res.json({ ...attribute, options: parseJson(attribute.optionsJson, []) });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );
@@ -692,7 +694,7 @@ lovRouter.delete(
         return res.status(404).json({ error: "LOV attribute not found" });
       res.json({ id: attribute.id });
     } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
+      sendError(res, error);
     }
   },
 );

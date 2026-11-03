@@ -3,6 +3,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { lovItems, lovLists } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError, ValidationError } from "../http/errors.js";
 
 export const referenceDataRouter = Router();
 
@@ -52,7 +53,7 @@ function getString(value: unknown, fallback = ""): string {
 function getActiveStatus(body: Record<string, unknown>, existing?: LovItem) {
   if (body.isActive === undefined) return existing?.status ?? "active";
   if (typeof body.isActive !== "boolean")
-    throw new Error("isActive must be a boolean.");
+    throw new ValidationError("isActive must be a boolean.");
   return body.isActive ? "active" : "inactive";
 }
 
@@ -169,7 +170,7 @@ async function getListId(listCode: string): Promise<string | null> {
 
 async function listItems(listCode: string) {
   const listId = await getListId(listCode);
-  if (!listId) throw new Error(`LOV list ${listCode} not found.`);
+  if (!listId) throw new ValidationError(`LOV list ${listCode} not found.`);
   return db
     .select()
     .from(lovItems)
@@ -189,18 +190,18 @@ async function findItem(listCode: string, id: string): Promise<LovItem | null> {
 
 function validateValues(adapter: CatalogAdapter, values: CatalogValues) {
   if (!values.code || !values.label)
-    throw new Error("code and name are required.");
+    throw new ValidationError("code and name are required.");
   if (adapter.listCode === "VEHICLE_TYPES") {
     const category = values.attrs.category;
     const interval = values.attrs.pms_interval_km;
     if (!["light", "medium", "heavy", "special"].includes(String(category)))
-      throw new Error("category must be light, medium, heavy, or special.");
+      throw new ValidationError("category must be light, medium, heavy, or special.");
     if (
       typeof interval !== "number" ||
       !Number.isFinite(interval) ||
       interval <= 0
     )
-      throw new Error("pmsIntervalKm must be a positive number.");
+      throw new ValidationError("pmsIntervalKm must be a positive number.");
   }
   for (const [key, value] of Object.entries(values.attrs)) {
     if (
@@ -208,7 +209,7 @@ function validateValues(adapter: CatalogAdapter, values: CatalogValues) {
       typeof value !== "number" &&
       typeof value !== "boolean"
     )
-      throw new Error(`Attribute "${key}" must be a scalar value.`);
+      throw new ValidationError(`Attribute "${key}" must be a scalar value.`);
   }
 }
 
@@ -224,7 +225,7 @@ for (const adapter of catalogs) {
           ),
         );
       } catch (error) {
-        res.status(500).json({ error: (error as Error).message });
+        sendError(res, error);
       }
     },
   );
@@ -250,7 +251,7 @@ for (const adapter of catalogs) {
           .returning();
         res.status(201).json(adapter.toLegacy(item, values.attrs));
       } catch (error) {
-        res.status(400).json({ error: (error as Error).message });
+        sendError(res, error);
       }
     },
   );
@@ -280,7 +281,7 @@ for (const adapter of catalogs) {
           .returning();
         res.json(adapter.toLegacy(item, values.attrs));
       } catch (error) {
-        res.status(400).json({ error: (error as Error).message });
+        sendError(res, error);
       }
     },
   );
@@ -301,7 +302,7 @@ for (const adapter of catalogs) {
           id: item.id,
         });
       } catch (error) {
-        res.status(500).json({ error: (error as Error).message });
+        sendError(res, error);
       }
     },
   );

@@ -80,6 +80,13 @@ export async function ensureDatabaseAndTables(): Promise<void> {
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS document_counters (
+        prefix TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        last_value INTEGER NOT NULL,
+        PRIMARY KEY (prefix, year)
+      );
+
       CREATE TABLE IF NOT EXISTS pms_records (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         vehicle_id UUID NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
@@ -600,6 +607,32 @@ export async function ensureDatabaseAndTables(): Promise<void> {
       )
       ON CONFLICT (id) DO NOTHING;
     `);
+
+    const indexes = [
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS auth_identities_user_id_idx ON auth_identities(user_id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS auth_sessions_user_expiry_idx ON auth_sessions(user_id, expires_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS auth_sessions_expiry_retention_idx ON auth_sessions(expires_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS auth_sessions_revoked_retention_idx ON auth_sessions(revoked_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS password_reset_tokens_expiry_retention_idx ON password_reset_tokens(expires_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS password_reset_tokens_consumed_retention_idx ON password_reset_tokens(consumed_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS auth_signup_requests_verification_retention_idx ON auth_signup_requests(status, verification_expires_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS activity_logs_created_id_idx ON activity_logs(created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS activity_logs_module_created_idx ON activity_logs(module, created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS activity_logs_severity_created_idx ON activity_logs(severity, created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS form_versions_definition_version_idx ON form_versions(form_definition_id, version)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS purchase_requisitions_created_idx ON purchase_requisitions(created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS pms_records_vehicle_created_idx ON pms_records(vehicle_id, created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS pms_records_created_idx ON pms_records(created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS pms_records_completed_at_idx ON pms_records(completed_at)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS repair_work_orders_vehicle_created_idx ON repair_work_orders(vehicle_id, created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS repair_work_orders_created_idx ON repair_work_orders(created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS repair_work_orders_procurement_created_idx ON repair_work_orders(procurement_fulfillment_status, created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS tsrf_requests_created_idx ON tsrf_requests(created_at, id)",
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS tsrf_requests_assigned_created_idx ON tsrf_requests(assigned_vehicle_id, created_at DESC, id DESC)",
+    ];
+    for (const statement of indexes) {
+      await dbClient.query(statement);
+    }
 
     logger.info("[Database] All tables initialized successfully.");
   } catch (err: unknown) {

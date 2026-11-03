@@ -1,33 +1,85 @@
-import { app } from './app.js';
-import { config } from './config/env.js';
-import { logger } from './config/logger.js';
-import { ensureDatabaseAndTables } from './db/migrate.js';
-import { testDbConnection } from './db/connection.js';
+import "./instrumentation.js";
+import type { Server } from "node:http";
+import { app } from "./app.js";
+import { config } from "./config/env.js";
+import { logger } from "./config/logger.js";
+import { ensureDatabaseAndTables } from "./db/migrate.js";
+import { pool, testDbConnection } from "./db/connection.js";
+import { scheduleAuthRecordCleanup } from "./db/retention.js";
+import { telemetrySdk } from "./instrumentation.js";
 
-async function bootstrap() {
-  logger.info('[Bootstrap] Initializing Hulma Fleet Logistics & Maintenance API...');
+let server: Server | undefined;
+let retentionTimer: NodeJS.Timeout | undefined;
+let shuttingDown = false;
 
-  try {
-    const isConnected = await testDbConnection();
-    if (isConnected) {
-      await ensureDatabaseAndTables();
-    }
-  } catch (err: unknown) {
-    const error = err as Error;
-    logger.warn({ error: error.message }, '[Bootstrap] DB init notice, continuing server launch...');
+async function bootstrap(): Promise<void> {
+  logger.info("[Bootstrap] Initializing Hulma Fleet Logistics & Maintenance API");
+
+  if (!(await testDbConnection())) {
+    throw new Error("PostgreSQL is unavailable; refusing to start API.");
   }
+  await ensureDatabaseAndTables();
 
-  app.listen(config.port, () => {
-    logger.info(`🚀 Server running on http://localhost:${config.port}`);
-    logger.info(`   - Health check: http://localhost:${config.port}/api/health`);
-    logger.info(`   - Vehicles API: http://localhost:${config.port}/api/vehicles`);
-    logger.info(`   - TSRF API:     http://localhost:${config.port}/api/tsrf`);
-    logger.info(`   - Maintenance:  http://localhost:${config.port}/api/maintenance`);
-    logger.info(`   - Procurement:  http://localhost:${config.port}/api/procurement`);
+  const httpServer = app.listen(config.port);
+  server = httpServer;
+  httpServer.requestTimeout = config.requestTimeoutMs;
+  httpServer.headersTimeout = config.requestTimeoutMs + 5000;
+  httpServer.keepAliveTimeout = 5000;
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("listening", () => {
+      logger.info(
+        { port: config.port },
+        "[Bootstrap] Fleet API is accepting requests",
+      );
+      resolve();
+    });
+    httpServer.once("error", reject);
   });
+  retentionTimer = scheduleAuthRecordCleanup();
 }
 
-bootstrap().catch((err) => {
-  logger.error(err, '[Bootstrap] Fatal startup error');
-  process.exit(1);
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal }, "[Shutdown] Draining API and closing dependencies");
+  if (retentionTimer) clearInterval(retentionTimer);
+
+  const forceTimer = setTimeout(() => {
+    logger.fatal("[Shutdown] Grace period exceeded; closing remaining connections");
+    server?.closeAllConnections();
+    process.exit(1);
+  }, 10_000);
+  forceTimer.unref();
+
+  try {
+    const activeServer = server;
+    if (activeServer) {
+      await new Promise<void>((resolve, reject) => {
+        activeServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+    await pool.end();
+    await telemetrySdk.shutdown();
+    clearTimeout(forceTimer);
+    logger.info("[Shutdown] API shutdown completed");
+  } catch (error) {
+    logger.error({ error }, "[Shutdown] Failed to close API dependencies");
+    process.exitCode = 1;
+  }
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
+
+bootstrap().catch(async (error: unknown) => {
+  logger.fatal({ error }, "[Bootstrap] API startup failed");
+  try {
+    await pool.end();
+    await telemetrySdk.shutdown();
+  } catch (shutdownError) {
+    logger.error({ error: shutdownError }, "[Bootstrap] Cleanup failed");
+  }
+  process.exitCode = 1;
 });
+
+// Hot-reload verification test

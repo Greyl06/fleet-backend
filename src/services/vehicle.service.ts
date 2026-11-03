@@ -4,6 +4,7 @@ import { vehicles } from "../db/schema.js";
 import { getPmsStatus, isPmsOverdue } from "../domain/pms.js";
 import { calculateOdometerUpdate } from "../domain/odometer.js";
 import { logger } from "../config/logger.js";
+import { NotFoundError } from '../http/errors.js';
 
 export class VehicleService {
   static async listVehicles() {
@@ -76,7 +77,7 @@ export class VehicleService {
   static async updateMileage(vehicleId: string, endingKm: number) {
     const vehicle = await this.getVehicleById(vehicleId);
     if (!vehicle) {
-      throw new Error(`Vehicle with ID ${vehicleId} not found`);
+      throw new NotFoundError('Vehicle not found.');
     }
 
     const odometerUpdate = calculateOdometerUpdate(vehicle, endingKm);

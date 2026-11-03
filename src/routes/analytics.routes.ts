@@ -24,9 +24,8 @@ analyticsRouter.get('/tco', requireTcoPermission, async (req: Request, res: Resp
     const summary = await AnalyticsService.getFleetTcoAnalytics();
     res.json(summary);
   } catch (err: unknown) {
-    const error = err as Error;
-    logger.error({ error: error.message }, '[AnalyticsRouter] Failed to retrieve TCO summary');
-    res.status(500).json({ error: 'Failed to retrieve TCO analytics', message: error.message });
+    logger.error({ err }, '[AnalyticsRouter] Failed to retrieve TCO summary');
+    res.status(500).json({ error: 'Failed to retrieve TCO analytics' });
   }
 });
 
@@ -41,8 +40,7 @@ analyticsRouter.get('/vehicles/:id', requireTcoPermission, async (req: Request, 
     }
     res.json(detail);
   } catch (err: unknown) {
-    const error = err as Error;
-    logger.error({ error: error.message }, '[AnalyticsRouter] Failed to retrieve vehicle TCO detail');
-    res.status(500).json({ error: 'Failed to retrieve vehicle TCO detail', message: error.message });
+    logger.error({ err }, '[AnalyticsRouter] Failed to retrieve vehicle TCO detail');
+    res.status(500).json({ error: 'Failed to retrieve vehicle TCO detail' });
   }
 });

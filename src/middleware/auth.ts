@@ -7,6 +7,7 @@ import {
   type Subject,
 } from "../auth/abilities.js";
 import { config } from "../config/env.js";
+import { AppError } from "../http/errors.js";
 import {
   authenticateEntraToken,
   authenticateLocalSession,
@@ -34,6 +35,17 @@ function cookieValue(
     .map((value) => value.trim())
     .find((value) => value.startsWith(`${name}=`));
   return part ? decodeURIComponent(part.slice(name.length + 1)) : undefined;
+}
+
+function clearSessionCookies(res: Response): void {
+  const options = [
+    "Path=/",
+    `SameSite=${config.env === "production" ? "None" : "Lax"}`,
+    "Max-Age=0",
+    ...(config.env === "production" ? ["Secure"] : []),
+  ];
+  res.append("Set-Cookie", `fleet_session=; ${options.join("; ")}; HttpOnly`);
+  res.append("Set-Cookie", `fleet_csrf=; ${options.join("; ")}`);
 }
 
 function isPublicRequest(req: Request): boolean {
@@ -109,6 +121,7 @@ export async function authMiddleware(
     if (sessionToken) {
       const principal = await authenticateLocalSession(sessionToken);
       if (!principal) {
+        clearSessionCookies(res);
         res
           .status(401)
           .json({
@@ -185,6 +198,11 @@ export async function authMiddleware(
         message: "Authentication could not be verified.",
       });
   }
+}
+
+export function currentUser(req: Request): import("../auth/abilities.js").AuthUser {
+  if (!req.user) throw new AppError(401, "Unauthorized", "Authentication required.");
+  return req.user;
 }
 
 export function requirePermission(action: Action, subject: Subject) {

@@ -3,6 +3,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { activityLogs } from "../db/schema.js";
 import { requirePermission } from "../middleware/auth.js";
+import { sendError } from "../http/errors.js";
 
 export const activityLogRouter = Router();
 
@@ -39,8 +40,7 @@ activityLogRouter.get("/", requirePermission("read", "AuditLog"), async (req: Re
       .limit(500);
     res.json(logs);
   } catch (err: unknown) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
+    sendError(res, err);
   }
 });
 
@@ -75,8 +75,7 @@ activityLogRouter.post(
         .returning();
       res.status(201).json(created);
     } catch (err: unknown) {
-      const error = err as Error;
-      res.status(400).json({ error: error.message });
+      sendError(res, err);
     }
   },
 );
